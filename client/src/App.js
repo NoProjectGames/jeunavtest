@@ -455,9 +455,30 @@ function App() {
   function handleMapClickForBuild(e) {
     if (isEliminated) return;
     if (!gameStarted) return;
-    const rect = svgRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
-    const y = ((e.clientY - rect.top) / rect.height) * svgHeight;
+    // Utilisation de getScreenCTM pour une conversion fiable
+    const svg = svgRef.current;
+    let x, y;
+    if (svg && typeof svg.createSVGPoint === 'function') {
+      const pt = svg.createSVGPoint();
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+      const ctm = svg.getScreenCTM();
+      if (ctm) {
+        const svgP = pt.matrixTransform(ctm.inverse());
+        x = svgP.x;
+        y = svgP.y;
+      } else {
+        // Fallback si getScreenCTM échoue
+        const rect = svg.getBoundingClientRect();
+        x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
+        y = ((e.clientY - rect.top) / rect.height) * svgHeight;
+      }
+    } else {
+      // Fallback si createSVGPoint n'est pas disponible
+      const rect = svgRef.current.getBoundingClientRect();
+      x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
+      y = ((e.clientY - rect.top) / rect.height) * svgHeight;
+    }
     if (pendingBuilding) {
       // Vérifier que le clic est dans la zone de construction (zone grise)
       const mapTop = svgHeight * 0.2;
