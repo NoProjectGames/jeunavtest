@@ -18,10 +18,11 @@ let sessions = {};
 function createSession(sessionName) {
   // Génère un id unique simple (timestamp + random)
   const sessionId = `${Date.now()}_${Math.floor(Math.random()*10000)}`;
+  const players = Array(8).fill(null); // slots vides
   sessions[sessionId] = {
     sessionId,
     name: sessionName,
-    players: Array(8).fill(null),
+    players: players,
     buildings: [],
     missiles: [],
     drones: [],
@@ -34,6 +35,8 @@ function createSession(sessionName) {
     barrackTimers: new Map(),
     droneFactoryTimers: new Map(),
     buildingIdCounter: 0,
+    segmentsByPlayer: new Map(),
+    lastAttacker: Array(8).fill(null),
   };
   return sessionId;
 }
@@ -66,7 +69,7 @@ function startCountdown() {
   if (countdown || gameStarted) return;
   
   console.log('⏰ Starting countdown...');
-  countdownValue = 10;
+  countdownValue = 3;
   io.emit('countdown_update', countdownValue);
   
   countdown = setInterval(() => {
@@ -708,7 +711,7 @@ io.on('connection', (socket) => {
       return;
     }
     // Place le joueur dans le slot
-    session.players[freeIndex] = { id: socket.id, pseudo };
+    session.players[freeIndex] = { id: socket.id, pseudo, gold: 30000, datas: 100000 };
     socket.join(sessionId);
     socket.sessionId = sessionId;
     socket.playerIndex = freeIndex;
@@ -765,12 +768,58 @@ io.on('connection', (socket) => {
     session.gameStarted = false;
     session.missileIdCounter = 0;
     session.droneIdCounter = 0;
+    stopDatasProductionForSession(sessionId);
     io.to(sessionId).emit('game_reset', {
       buildings: session.buildings,
       missiles: session.missiles,
       drones: session.drones,
       playerHealth: session.playerHealth
     });
+  });
+
+  // Ajout : gestion du tir de missile personnalisé
+  socket.on('launch_missile', ({ fromBuildingId, missileType, sessionId }) => {
+    const session = sessions[sessionId];
+    if (!session || !session.gameStarted) return;
+    // Trouver la caserne
+    const barrack = session.buildings.find(b => b.id === fromBuildingId && b.name === 'Lance Missile');
+    if (!barrack) return;
+    // Déterminer la direction
+    const screenWidth = 1920;
+    const segmentWidth = screenWidth / 8;
+    const segmentMidpoint = barrack.ownerSlot * segmentWidth + segmentWidth / 2;
+    const direction = barrack.x < segmentMidpoint ? -1 : 1;
+    // Propriétés des types de missiles
+    const MISSILE_TYPES = {
+      rapide: { damage: 1, speed: 7, radius: 3 },
+      furtif: { damage: 2, speed: 4, radius: 5 },
+      lourd:  { damage: 5, speed: 2, radius: 7 }
+    };
+    const type = MISSILE_TYPES[missileType] ? missileType : 'rapide';
+    const props = MISSILE_TYPES[type];
+    const missile = {
+      id: session.missileIdCounter++,
+      x: barrack.x,
+      y: barrack.y,
+      ownerSlot: barrack.ownerSlot,
+      direction,
+      createdAt: Date.now(),
+      type,
+      damage: props.damage,
+      speed: props.speed,
+      radius: props.radius
+    };
+    session.missiles.push(missile);
+    io.to(sessionId).emit('missiles_update', session.missiles);
+  });
+
+  // Ajout : gestion du changement de type de missile d'une caserne
+  socket.on('set_barrack_missile_type', ({ buildingId, missileType, sessionId }) => {
+    const session = sessions[sessionId];
+    if (!session || !session.gameStarted) return;
+    const barrack = session.buildings.find(b => b.id === buildingId && b.name === 'Lance Missile');
+    if (!barrack) return;
+    barrack.missileType = missileType;
   });
 
   // TODO : Adapter tous les autres événements (place_building, etc.) pour fonctionner par session
@@ -855,10 +904,15 @@ function startGameForSession(sessionId) {
     // Collisions par session
     checkMissileCollisionsForSession(session);
     checkMissileToMissileCollisionsForSession(session);
+    checkAntimissileInterceptionForSession(session);
     checkMissileToBuildingCollisionsForSession(session);
+    checkDroneCollisionsForSession(session);
     io.to(sessionId).emit('missiles_update', session.missiles);
     io.to(sessionId).emit('drones_update', session.drones);
   }, 16);
+
+  // Démarrer la production de datas
+  startDatasProductionForSession(sessionId);
 
   // Envoyer l'état initial à tous les joueurs
   io.to(sessionId).emit('game_started', {
@@ -895,16 +949,45 @@ function createMissileFromBarrackForSession(session, barrack) {
   const segmentWidth = screenWidth / 8;
   const segmentMidpoint = barrack.ownerSlot * segmentWidth + segmentWidth / 2;
   const direction = barrack.x < segmentMidpoint ? -1 : 1;
+  // Propriétés des types de missiles
+  const MISSILE_TYPES = {
+    rapide: { damage: 1, speed: 7, radius: 3, cost: 10000 },
+    furtif: { damage: 2, speed: 4, radius: 5, cost: 50000 },
+    lourd:  { damage: 5, speed: 2, radius: 7, cost: 100000 }
+  };
+  const type = MISSILE_TYPES[barrack.missileType] ? barrack.missileType : 'rapide';
+  const props = MISSILE_TYPES[type];
+  // Vérifie la datas du joueur
+  const player = session.players[barrack.ownerSlot];
+  if (!player || typeof player.datas !== 'number' || player.datas < props.cost) {
+    // Pas assez de datas, ne tire pas
+    return;
+  }
+  // Déduis le coût
+  player.datas -= props.cost;
+  // Crée le missile
   const missile = {
     id: session.missileIdCounter++,
     x: barrack.x,
     y: barrack.y,
     ownerSlot: barrack.ownerSlot,
     direction,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    type,
+    damage: props.damage,
+    speed: props.speed,
+    radius: props.radius
   };
   session.missiles.push(missile);
   io.to(session.sessionId || session.id).emit('missiles_update', session.missiles);
+  // Envoie la nouvelle valeur de datas au joueur concerné
+  const playerIndex = barrack.ownerSlot;
+  const sockets = Array.from(io.sockets.sockets.values());
+  for (const s of sockets) {
+    if (s.sessionId === session.sessionId && s.playerIndex === playerIndex && session.players[playerIndex]) {
+      s.emit('resources_update', { datas: player.datas });
+    }
+  }
 }
 // --- Collisions par session ---
 function checkMissileCollisionsForSession(session) {
@@ -914,10 +997,31 @@ function checkMissileCollisionsForSession(session) {
     const missile = session.missiles[i];
     for (let playerSlot = 0; playerSlot < 8; playerSlot++) {
       const playerCenterX = playerSlot * segmentWidth + segmentWidth / 2;
+      // Déterminer le vrai propriétaire du segment via segmentsByPlayer
+      let ownerSlot = playerSlot;
+      if (session.segmentsByPlayer && session.segmentsByPlayer instanceof Map && session.segmentsByPlayer.size > 0) {
+        for (const [slot, segs] of session.segmentsByPlayer.entries()) {
+          if (segs.has(playerSlot)) {
+            ownerSlot = slot;
+            break;
+          }
+        }
+      }
+      // Ne pas toucher les bases alliées
+      if (missile.ownerSlot === parseInt(ownerSlot)) continue;
       if (Math.abs(missile.x - playerCenterX) < 10) {
-        session.playerHealth[playerSlot] = Math.max(0, session.playerHealth[playerSlot] - MISSILE_DAMAGE);
+        // Stocker le dernier attaquant
+        session.lastAttacker[playerSlot] = missile.ownerSlot;
+        const prevHealth = session.playerHealth[playerSlot];
+        // Appliquer les dégâts du missile (par défaut 1 si non défini)
+        const dmg = typeof missile.damage === 'number' ? missile.damage : 1;
+        session.playerHealth[playerSlot] = Math.max(0, session.playerHealth[playerSlot] - dmg);
         session.missiles.splice(i, 1);
         io.to(session.sessionId || session.id).emit('health_update', session.playerHealth);
+        // Si le joueur vient d'être éliminé, annexer son segment
+        if (prevHealth > 0 && session.playerHealth[playerSlot] === 0 && session.lastAttacker[playerSlot] !== null && session.lastAttacker[playerSlot] !== playerSlot) {
+          annexSegmentOnElimination(session, playerSlot, session.lastAttacker[playerSlot]);
+        }
         break;
       }
     }
@@ -943,8 +1047,87 @@ function stopDroneFactoryTimerForSession(session, factory) {
   }
 }
 function createDroneFromFactoryForSession(session, factory) {
-  // (logique similaire à la version globale, mais sur session)
-  // ...
+  // Trouver une cible ennemie (bâtiment ou base)
+  const screenWidth = 1920;
+  const segmentWidth = screenWidth / 8;
+  const segmentStart = factory.ownerSlot * segmentWidth;
+  const segmentEnd = segmentStart + segmentWidth;
+  const segmentMidpoint = segmentStart + segmentWidth / 2;
+  const direction = factory.x < segmentMidpoint ? -1 : 1;
+
+  // Chercher d'abord des bâtiments ennemis dans la bonne direction
+  const enemyBuildings = session.buildings.filter(b => {
+    if (b.ownerSlot === factory.ownerSlot) return false;
+    if (direction === 1) {
+      return b.x >= segmentMidpoint;
+    } else {
+      return b.x < segmentMidpoint;
+    }
+  });
+
+  let target = null;
+  if (enemyBuildings.length > 0) {
+    const randomBuilding = enemyBuildings[Math.floor(Math.random() * enemyBuildings.length)];
+    target = {
+      x: randomBuilding.x,
+      y: randomBuilding.y,
+      type: 'building',
+      id: randomBuilding.id || 'building'
+    };
+  } else {
+    // Sinon, cibler une base ennemie
+    if (direction === 1) {
+      for (let i = factory.ownerSlot + 1; i < 8; i++) {
+        if (session.playerHealth[i] > 0) {
+          const baseX = i * segmentWidth + segmentWidth / 2;
+          target = { x: baseX, y: 350, type: 'base', id: `player_${i}` };
+          break;
+        }
+      }
+      if (!target && factory.ownerSlot !== 7 && session.playerHealth[7] > 0) {
+        const baseX = 7 * segmentWidth + segmentWidth / 2;
+        target = { x: baseX, y: 350, type: 'base', id: `player_7` };
+      }
+    } else {
+      for (let i = factory.ownerSlot - 1; i >= 0; i--) {
+        if (session.playerHealth[i] > 0) {
+          const baseX = i * segmentWidth + segmentWidth / 2;
+          target = { x: baseX, y: 350, type: 'base', id: `player_${i}` };
+          break;
+        }
+      }
+      if (!target && factory.ownerSlot !== 0 && session.playerHealth[0] > 0) {
+        const baseX = 0 * segmentWidth + segmentWidth / 2;
+        target = { x: baseX, y: 350, type: 'base', id: `player_0` };
+      }
+    }
+    // Si aucune cible trouvée, cible par défaut
+    if (!target) {
+      if (direction === 1) {
+        const defaultTargetSlot = (factory.ownerSlot + 1) % 8;
+        const baseX = defaultTargetSlot * segmentWidth + segmentWidth / 2;
+        target = { x: baseX, y: 350, type: 'base', id: `player_${defaultTargetSlot}` };
+      } else {
+        const defaultTargetSlot = (factory.ownerSlot - 1 + 8) % 8;
+        const baseX = defaultTargetSlot * segmentWidth + segmentWidth / 2;
+        target = { x: baseX, y: 350, type: 'base', id: `player_${defaultTargetSlot}` };
+      }
+    }
+  }
+  if (!target) return;
+  const drone = {
+    id: session.droneIdCounter++,
+    x: factory.x,
+    y: factory.y,
+    ownerSlot: factory.ownerSlot,
+    targetX: target.x,
+    targetY: target.y,
+    targetType: target.type,
+    targetId: target.id,
+    createdAt: Date.now()
+  };
+  session.drones.push(drone);
+  io.to(session.sessionId || session.id).emit('drones_update', session.drones);
 }
 // --- Collisions drones, missiles/bâtiments, etc. par session ---
 function checkMissileToMissileCollisionsForSession(session) {
@@ -969,6 +1152,31 @@ function checkMissileToMissileCollisionsForSession(session) {
     if (missile1Destroyed) break;
   }
 }
+
+// Ajout : interception antimissile par session
+function checkAntimissileInterceptionForSession(session) {
+  const antimissileBuildings = session.buildings.filter(b => b.name === 'Antimissile');
+  const interceptionRange = 50;
+  for (let i = session.missiles.length - 1; i >= 0; i--) {
+    const missile = session.missiles[i];
+    let missileIntercepted = false;
+    for (const antimissile of antimissileBuildings) {
+      if (missile.ownerSlot === antimissile.ownerSlot) continue;
+      const distance = Math.sqrt(
+        Math.pow(missile.x - antimissile.x, 2) +
+        Math.pow(missile.y - antimissile.y, 2)
+      );
+      if (distance < interceptionRange) {
+        console.log(`[SESSION ${session.name}] 🛡️ Antimissile (P${antimissile.ownerSlot + 1}) intercepted enemy missile ${missile.id} (P${missile.ownerSlot + 1}) at distance ${distance.toFixed(1)}px`);
+        session.missiles.splice(i, 1);
+        missileIntercepted = true;
+        break;
+      }
+    }
+    if (missileIntercepted) break;
+  }
+}
+
 function checkMissileToBuildingCollisionsForSession(session) {
   const buildingCollisionRange = 20;
   let buildingsChanged = false;
@@ -1004,4 +1212,112 @@ function checkMissileToBuildingCollisionsForSession(session) {
     io.to(session.sessionId || session.id).emit('buildings_update', session.buildings);
   }
 }
-// ... 
+
+function checkDroneCollisionsForSession(session) {
+  const droneCollisionRange = 15;
+  for (let i = session.drones.length - 1; i >= 0; i--) {
+    const drone = session.drones[i];
+    let droneHit = false;
+    // Vérifier la collision avec la cible
+    const distance = Math.sqrt(
+      Math.pow(drone.x - drone.targetX, 2) +
+      Math.pow(drone.y - drone.targetY, 2)
+    );
+    if (distance < droneCollisionRange) {
+      // Appliquer les dégâts selon le type de cible
+      if (drone.targetType === 'building') {
+        // Chercher le bâtiment ciblé et le détruire
+        for (let j = session.buildings.length - 1; j >= 0; j--) {
+          const building = session.buildings[j];
+          const buildingDistance = Math.sqrt(
+            Math.pow(drone.x - building.x, 2) +
+            Math.pow(drone.y - building.y, 2)
+          );
+          if (buildingDistance < droneCollisionRange) {
+            // Si c'est un Lance Missile détruit, arrêter son timer
+            if (building.name === 'Lance Missile') {
+              stopBarrackTimerForSession(session, building);
+            }
+            // Si c'est une Usine de Drones détruite, arrêter son timer
+            if (building.name === 'Usine de Drones') {
+              stopDroneFactoryTimerForSession(session, building);
+            }
+            session.buildings.splice(j, 1);
+            io.to(session.sessionId || session.id).emit('buildings_update', session.buildings);
+            break;
+          }
+        }
+      }
+      if (drone.targetType === 'base') {
+        const targetPlayerSlot = parseInt(drone.targetId.split('_')[1]);
+        // Stocker le dernier attaquant
+        session.lastAttacker[targetPlayerSlot] = drone.ownerSlot;
+        const prevHealth = session.playerHealth[targetPlayerSlot];
+        session.playerHealth[targetPlayerSlot] = Math.max(0, session.playerHealth[targetPlayerSlot] - DRONE_DAMAGE);
+        io.to(session.sessionId || session.id).emit('health_update', session.playerHealth);
+        // Si le joueur vient d'être éliminé, annexer son segment
+        if (prevHealth > 0 && session.playerHealth[targetPlayerSlot] === 0 && session.lastAttacker[targetPlayerSlot] !== null && session.lastAttacker[targetPlayerSlot] !== targetPlayerSlot) {
+          annexSegmentOnElimination(session, targetPlayerSlot, session.lastAttacker[targetPlayerSlot]);
+        }
+      }
+      // Supprimer le drone qui a explosé
+      session.drones.splice(i, 1);
+      droneHit = true;
+    }
+    if (droneHit) break;
+  }
+}
+
+// Ajout : gestion des segments possédés par chaque joueur (par session)
+function annexSegmentOnElimination(session, eliminatedSlot, killerSlot) {
+  if (!session.segmentsByPlayer) session.segmentsByPlayer = new Map();
+  // Ajouter le segment éliminé à la liste du vainqueur
+  if (!session.segmentsByPlayer.has(killerSlot)) session.segmentsByPlayer.set(killerSlot, new Set([killerSlot]));
+  session.segmentsByPlayer.get(killerSlot).add(eliminatedSlot);
+  // Transférer tous les bâtiments du segment
+  const screenWidth = 1920;
+  const segmentWidth = screenWidth / 8;
+  const segStart = eliminatedSlot * segmentWidth;
+  const segEnd = segStart + segmentWidth;
+  session.buildings.forEach(b => {
+    if (b.x >= segStart && b.x < segEnd) {
+      b.ownerSlot = killerSlot;
+    }
+  });
+  // Mettre à jour le pseudo du segment (affiché côté client)
+  // (Le client affichera le pseudo du killerSlot pour ce segment)
+  // Fusionner la vie : tous les segments du vainqueur affichent la vie de killerSlot
+  // (Côté client, il faudra afficher playerHealth[killerSlot] pour tous les segments du vainqueur)
+  // Envoyer les updates
+  io.to(session.sessionId || session.id).emit('buildings_update', session.buildings);
+  io.to(session.sessionId || session.id).emit('segments_update', Array.from(session.segmentsByPlayer.entries()).map(([slot, segs]) => ({ownerSlot: slot, segments: Array.from(segs)})));
+}
+
+// Ajoute la production automatique de datas par session
+function startDatasProductionForSession(sessionId) {
+  const session = sessions[sessionId];
+  if (!session) return;
+  if (session.datasProdInterval) clearInterval(session.datasProdInterval);
+  session.datasProdInterval = setInterval(() => {
+    for (let i = 0; i < session.players.length; i++) {
+      const player = session.players[i];
+      if (player && typeof player.datas === 'number') {
+        player.datas += 20000;
+        // Envoie la nouvelle valeur au client
+        const sockets = Array.from(io.sockets.sockets.values());
+        for (const s of sockets) {
+          if (s.sessionId === sessionId && s.playerIndex === i) {
+            s.emit('resources_update', { datas: player.datas });
+          }
+        }
+      }
+    }
+  }, 1000);
+}
+function stopDatasProductionForSession(sessionId) {
+  const session = sessions[sessionId];
+  if (session && session.datasProdInterval) {
+    clearInterval(session.datasProdInterval);
+    session.datasProdInterval = null;
+  }
+} 

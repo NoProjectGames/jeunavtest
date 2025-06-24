@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { io } from 'socket.io-client';
 
-const socket = io('http://localhost:3001'); //https://jeunavtest.onrender.com //http://localhost:3001
+const socket = io('https://jeunavtest.onrender.com'); //https://jeunavtest.onrender.com //http://localhost:3001
 
 const NB_PLAYERS = 8;
 const BASE_VIEW_RATIO = 0.7;
@@ -12,7 +12,7 @@ const BUILDINGS = [
   { name: 'Antimissile', icon: '��️', cost: 20000 },
   { name: 'Usine de Drones', icon: '🤖', cost: 55000 },
 ];
-const INITIAL_RESOURCES = { gold: 30000, wood: 50, stone: 50, population: 10, populationMax: 20, cryptoPerSec: 1000 };
+const INITIAL_RESOURCES = { gold: 30000, datas: 100000, population: 10, populationMax: 20, cryptoPerSec: 1000 };
 const BASE_GOLD_PER_SEC = 1000;
 const CRYPTO_FARM_BONUS = 5000;
 const BASE_POP_PER_SEC = 0.1;
@@ -37,6 +37,12 @@ const PLAYER_COLORS = [
   '#a54ae2'  // Violet pâle
 ];
 
+const MISSILE_TYPES = [
+  { type: 'lourd', label: 'Missile lourd', cost: 100000, speed: 2, damage: 5, color: '#b71c1c', radius: 7 },
+  { type: 'rapide', label: 'Missile rapide', cost: 10000, speed: 7, damage: 1, color: '#1976d2', radius: 3 },
+  { type: 'furtif', label: 'Missile furtif', cost: 50000, speed: 4, damage: 2, color: '#616161', radius: 5 }
+];
+
 function getPlayerIndex(players, myId, myIndex) {
   if (myIndex !== null && myIndex !== undefined) return myIndex;
   return players.findIndex(p => p && p.id === myId);
@@ -49,6 +55,9 @@ function distance(a, b) {
 }
 
 function App() {
+  // alert('HELLO FROM APP');
+  console.log('TEST LOG');
+  console.log('[APP] render');
   const [players, setPlayers] = useState([]);
   const [lobbyFull, setLobbyFull] = useState(false);
   const [lastClick, setLastClick] = useState(null);
@@ -77,6 +86,11 @@ function App() {
   const [sessionName, setSessionName] = useState(""); // Pour créer une session
   const [sessionId, setSessionId] = useState(null); // Id de la session rejointe
   const [joining, setJoining] = useState(false); // Pour désactiver les boutons pendant la connexion
+  const [segmentsByPlayer, setSegmentsByPlayer] = useState({});
+  const [forceUpdate, setForceUpdate] = useState(0);
+  const [missileMenu, setMissileMenu] = useState(null); // {x, y, buildingId}
+  const [errorMsg, setErrorMsg] = useState("");
+  const [lastMissileType, setLastMissileType] = useState(null); // Pour mémoriser le dernier type sélectionné
 
   const windowWidth = window.innerWidth;
   const svgHeight = 700;
@@ -117,6 +131,7 @@ function App() {
       setMissiles(gameState.missiles || []);
       setDrones(gameState.drones || []);
       setPlayerHealth(gameState.playerHealth || Array(8).fill(100));
+      setResources(INITIAL_RESOURCES);
     });
     
     socket.on('game_reset', (gameState) => {
@@ -170,6 +185,26 @@ function App() {
       setSessionLoading(false);
     });
     
+    socket.on('segments_update', (segmentsArr) => {
+      // segmentsArr: [{ownerSlot, segments: [segIdx, ...]}, ...]
+      const map = {};
+      segmentsArr.forEach(({ownerSlot, segments}) => {
+        segments.forEach(seg => {
+          map[seg] = ownerSlot;
+        });
+      });
+      setSegmentsByPlayer(map);
+    });
+    
+    socket.on('resources_update', (data) => {
+      if (typeof data.gold === 'number') {
+        setResources(prev => ({ ...prev, gold: data.gold }));
+      }
+      if (typeof data.datas === 'number') {
+        setResources(prev => ({ ...prev, datas: data.datas }));
+      }
+    });
+    
     return () => {
       socket.off('connect');
       socket.off('disconnect');
@@ -185,6 +220,7 @@ function App() {
       socket.off('health_update', setPlayerHealth);
       socket.off('drones_update', setDrones);
       socket.off('sessions_list');
+      socket.off('segments_update');
     };
   }, []);
 
@@ -198,31 +234,56 @@ function App() {
   const mySlot = getPlayerIndex(players, myId, myIndex);
   const baseX = mySlot * SEGMENT_WIDTH;
 
+  // Correction : initialisation locale de segmentsByPlayer si vide
+  const effectiveSegmentsByPlayer = Object.keys(segmentsByPlayer).length > 0
+    ? segmentsByPlayer
+    : (mySlot !== null && mySlot >= 0 ? { [mySlot]: mySlot } : {});
+  console.log('[DEBUG] effectiveSegmentsByPlayer:', JSON.stringify(effectiveSegmentsByPlayer));
+
   // Gain d'or (crypto) et de population chaque seconde
   useEffect(() => {
+    console.log('[PROD] useEffect called, gameStarted:', gameStarted);
     if (!gameStarted) return;
     const interval = setInterval(() => {
+      console.log('[PROD] setResources called');
+      // Utilise directement les states
+      const effectiveSegmentsByPlayer = Object.keys(segmentsByPlayer).length > 0
+        ? segmentsByPlayer
+        : (mySlot !== null && mySlot >= 0 ? { [mySlot]: mySlot } : {});
+      const SEGMENT_WIDTH_LOCAL = window.innerWidth / NB_PLAYERS;
+      const mySegments = Object.entries(effectiveSegmentsByPlayer)
+        .filter(([segIdx, owner]) => owner === mySlot)
+        .map(([segIdx]) => parseInt(segIdx));
+      const myBuildings = buildings.filter(b => {
+        const segIdx = Math.floor(b.x / SEGMENT_WIDTH_LOCAL);
+        return mySegments.includes(segIdx);
+      });
+      const nbCryptoFarms = myBuildings.filter(b => b.name === 'Crypto Farm').length;
+      const nbChateaux = myBuildings.filter(b => b.name === 'Château').length;
+      const goldGain = BASE_GOLD_PER_SEC + nbCryptoFarms * CRYPTO_FARM_BONUS;
+      console.log('[PROD][DEBUG] mySlot:', mySlot, '| effectiveSegmentsByPlayer:', JSON.stringify(effectiveSegmentsByPlayer));
+      console.log('[PROD][DEBUG] buildings:', JSON.stringify(buildings));
+      console.log('[PROD][DEBUG] mySegments:', mySegments, '| myBuildings:', myBuildings, '| nbCryptoFarms:', nbCryptoFarms, '| goldGain:', goldGain);
       setResources(prev => {
-        const myBuildings = buildings.filter(b => b.x >= baseX && b.x < baseX + SEGMENT_WIDTH);
-        const nbCryptoFarms = myBuildings.filter(b => b.name === 'Crypto Farm').length;
-        const nbChateaux = myBuildings.filter(b => b.name === 'Château').length;
-        const goldGain = BASE_GOLD_PER_SEC + nbCryptoFarms * CRYPTO_FARM_BONUS;
         let newPop = prev.population;
         if (prev.population < prev.populationMax) {
           newPop = clamp(prev.population + BASE_POP_PER_SEC, 0, prev.populationMax);
         }
         const newPopMax = INITIAL_RESOURCES.populationMax + nbChateaux * CHATEAU_POP_BONUS;
+        const newGold = prev.gold + goldGain;
+        console.log('[PROD] gold:', newGold, 'crypto/s:', goldGain);
         return {
           ...prev,
-          gold: prev.gold + goldGain,
+          gold: newGold,
           population: newPop,
           populationMax: newPopMax,
           cryptoPerSec: goldGain, // Stocker la production par seconde
         };
       });
+      setForceUpdate(f => f + 1); // Force un re-render
     }, 1000);
     return () => clearInterval(interval);
-  }, [gameStarted, buildings, baseX]);
+  }, [gameStarted, buildings, segmentsByPlayer, mySlot]);
 
   // Quand on rejoint une session, reset les états du jeu
   useEffect(() => {
@@ -231,53 +292,39 @@ function App() {
       setMissiles([]);
       setDrones([]);
       setPlayerHealth(Array(8).fill(100));
-      setGameStarted(false);
       setCountdown(null);
-      setResources(INITIAL_RESOURCES);
     }
   }, [sessionId, inLobby]);
 
-  function handleMapClick(e) {
-    if (isEliminated) return;
-    if (!gameStarted) return;
-    const rect = svgRef.current.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / zoom;
-    const y = (e.clientY - rect.top) / zoom;
-    if (pendingBuilding) {
-      // Vérifier que le clic est dans la zone de construction (zone grise)
-      const mapTop = svgHeight * 0.2;
-      const mapBottom = svgHeight * 0.8;
-      
-      if (mySlot < 0 || x < baseX || x >= baseX + SEGMENT_WIDTH || y < mapTop || y > mapBottom) {
-        setLastClick({ x: Math.round(x), y: Math.round(y), error: true });
-        return;
-      }
-      
-      // Vérifier si le joueur a assez de crypto pour construire
-      if (resources.gold < pendingBuilding.cost) {
-        setLastClick({ x: Math.round(x), y: Math.round(y), error: true });
-        return;
-      }
-      
-      // Créer le bâtiment avec l'information du propriétaire
-      const building = { x, y, ...pendingBuilding, ownerSlot: mySlot };
-      
-      // Déduire le coût du bâtiment des ressources
-      setResources(prev => ({
-        ...prev,
-        gold: prev.gold - pendingBuilding.cost
-      }));
-      
-      // Envoyer le bâtiment au serveur
-      if (playerHealth[building.ownerSlot] === 0) return;
-      socket.emit('place_building', { ...building, sessionId });
-      
-      setPendingBuilding(null);
-      setLastClick({ x: Math.round(x), y: Math.round(y), error: false });
-    } else {
-      setBuildMenu({ x: e.clientX, y: e.clientY });
-      setLastClick({ x: Math.round(x), y: Math.round(y), error: false });
+  // Ajoute un handler pour le clic sur un Lance Missile
+  function handleLanceMissileClick(e, building) {
+    e.stopPropagation();
+    // Vérifie si le joueur a assez de crypto pour le missile le moins cher
+    const minCost = Math.min(...MISSILE_TYPES.map(m => m.cost));
+    if (resources.gold < minCost) {
+      setErrorMsg("Pas assez de crypto pour lancer un missile.");
+      setTimeout(() => setErrorMsg(""), 2000);
+      return;
     }
+    setMissileMenu({ x: e.clientX, y: e.clientY, buildingId: building.id });
+  }
+
+  // Nouvelle fonction pour tirer un missile immédiatement
+  function fireMissile(buildingId, missileType) {
+    const missileDef = MISSILE_TYPES.find(m => m.type === missileType);
+    if (!missileDef) return;
+    if (resources.gold < missileDef.cost) {
+      setErrorMsg("Pas assez de crypto pour ce missile.");
+      setTimeout(() => setErrorMsg(""), 2000);
+      return;
+    }
+    setResources(prev => ({ ...prev, gold: prev.gold - missileDef.cost }));
+    socket.emit('launch_missile', {
+      fromBuildingId: buildingId,
+      missileType: missileDef.type,
+      sessionId
+    });
+    setLastMissileType(missileDef.type);
   }
 
   function handleBuildingSelect(building) {
@@ -346,6 +393,9 @@ function App() {
   // Log pour debug : voir la liste des bâtiments à chaque re-render
   console.log('RENDER buildings:', buildings.map(b => b.id));
 
+  // Log pour debug : voir la valeur de gold et de la production à chaque re-render
+  console.log('[RENDER] gold:', resources.gold, 'cryptoPerSec:', resources.cryptoPerSec);
+
   const isEliminated = mySlot >= 0 && playerHealth[mySlot] === 0;
 
   // Fonction pour rafraîchir la liste des sessions
@@ -394,6 +444,47 @@ function App() {
         setSessionError("");
       }
     });
+  }
+
+  // Gestion du clic gauche sur la carte pour la construction de bâtiments
+  function handleMapClickForBuild(e) {
+    if (isEliminated) return;
+    if (!gameStarted) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / zoom;
+    const y = (e.clientY - rect.top) / zoom;
+    if (pendingBuilding) {
+      // Vérifier que le clic est dans la zone de construction (zone grise)
+      const mapTop = svgHeight * 0.2;
+      const mapBottom = svgHeight * 0.8;
+      // Trouver le segment cliqué
+      const segIdx = Math.floor(x / SEGMENT_WIDTH);
+      const ownerSlot = effectiveSegmentsByPlayer[segIdx] !== undefined ? effectiveSegmentsByPlayer[segIdx] : segIdx;
+      if (mySlot < 0 || ownerSlot !== mySlot || y < mapTop || y > mapBottom) {
+        setLastClick({ x: Math.round(x), y: Math.round(y), error: true });
+        return;
+      }
+      // Vérifier si le joueur a assez de crypto pour construire
+      if (resources.gold < pendingBuilding.cost) {
+        setLastClick({ x: Math.round(x), y: Math.round(y), error: true });
+        return;
+      }
+      // Créer le bâtiment avec l'information du propriétaire
+      const building = { x, y, ...pendingBuilding, ownerSlot: mySlot };
+      // Déduire le coût du bâtiment des ressources
+      setResources(prev => ({
+        ...prev,
+        gold: prev.gold - pendingBuilding.cost
+      }));
+      // Envoyer le bâtiment au serveur
+      if (playerHealth[building.ownerSlot] === 0) return;
+      socket.emit('place_building', { ...building, sessionId });
+      setPendingBuilding(null);
+      setLastClick({ x: Math.round(x), y: Math.round(y), error: false });
+    } else {
+      setBuildMenu({ x: e.clientX, y: e.clientY });
+      setLastClick({ x: Math.round(x), y: Math.round(y), error: false });
+    }
   }
 
   if (inLobby) {
@@ -481,9 +572,8 @@ function App() {
         border: '2px solid #4a90e2',
       }}>
         <div style={{fontWeight:'bold',fontSize:20,marginBottom:8}}>Ressources</div>
+        <div>💾 Datas : <b>{resources.datas}</b> (+20,000/s)</div>
         <div>💰 Crypto : <b>{resources.gold}</b> (+{resources.cryptoPerSec || BASE_GOLD_PER_SEC}/s)</div>
-        <div>🌲 Bois : <b>{resources.wood}</b></div>
-        <div>🪨 Pierre : <b>{resources.stone}</b></div>
         <div style={{marginTop:6}}>👥 Population : <b>{resources.population}</b> / {resources.populationMax}</div>
       </div>
       {lobbyFull ? (
@@ -523,7 +613,7 @@ function App() {
                   transform: `scale(${zoom}) translate(${mapOffset.x / zoom}px, ${mapOffset.y / zoom}px)`,
                   transformOrigin: `${zoomCenter.x}% ${zoomCenter.y}%`,
                 }}
-                onClick={handleMapClick}
+                onClick={handleMapClickForBuild}
                 onWheel={handleWheel}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
@@ -535,9 +625,11 @@ function App() {
                 {/* Segments et bases */}
                 {Array.from({ length: NB_PLAYERS }).map((_, segIdx) => {
                   const x = segIdx * SEGMENT_WIDTH;
-                  const player = players[segIdx];
+                  // Déterminer le propriétaire du segment (ownerSlot)
+                  const ownerSlot = effectiveSegmentsByPlayer[segIdx] !== undefined ? effectiveSegmentsByPlayer[segIdx] : segIdx;
+                  const player = players[ownerSlot];
                   const pseudo = player && typeof player.pseudo === 'string' ? player.pseudo : '';
-                  const isMe = segIdx === mySlot;
+                  const isMe = ownerSlot === mySlot;
                   return (
                     <g key={segIdx}>
                       {/* Séparateur */}
@@ -559,10 +651,10 @@ function App() {
                         {/* Barre de vie (vie restante) */}
                         <rect
                           x={x + SEGMENT_WIDTH / 2 - 8}
-                          y={svgHeight * 0.2 + (svgHeight * 0.6) * (1 - playerHealth[segIdx] / 100)}
+                          y={svgHeight * 0.2 + (svgHeight * 0.6) * (1 - playerHealth[ownerSlot] / 100)}
                           width={16}
-                          height={(svgHeight * 0.6) * (playerHealth[segIdx] / 100)}
-                          fill={player ? PLAYER_COLORS[segIdx] : '#999'}
+                          height={(svgHeight * 0.6) * (playerHealth[ownerSlot] / 100)}
+                          fill={player ? PLAYER_COLORS[ownerSlot] : '#999'}
                           stroke="none"
                           rx={4}
                         />
@@ -574,7 +666,7 @@ function App() {
                           fontWeight="bold"
                           fill={player ? '#fff' : '#888'}
                         >
-                          {`P${segIdx + 1}`}
+                          {`P${ownerSlot + 1}`}
                         </text>
                         {/* Affichage de la vie en pourcentage */}
                         <text
@@ -585,7 +677,7 @@ function App() {
                           fontWeight="bold"
                           fill={player ? '#fff' : '#888'}
                         >
-                          {`${playerHealth[segIdx]}%`}
+                          {`${playerHealth[ownerSlot]}%`}
                         </text>
                         {/* Affichage du pseudo sous la vie pour chaque joueur (robuste) */}
                         {pseudo && (
@@ -595,7 +687,7 @@ function App() {
                             textAnchor="middle"
                             fontSize={14}
                             fontWeight="bold"
-                            fill={PLAYER_COLORS[segIdx]}
+                            fill={PLAYER_COLORS[ownerSlot]}
                           >
                             {pseudo}
                           </text>
@@ -627,10 +719,12 @@ function App() {
                       textAnchor="middle"
                       alignmentBaseline="middle"
                       style={{ 
-                        pointerEvents: 'none',
-                        filter: `drop-shadow(0 0 8px ${PLAYER_COLORS[b.ownerSlot] || '#999'})`
+                        pointerEvents: b.name === 'Lance Missile' ? 'auto' : 'none',
+                        filter: `drop-shadow(0 0 8px ${PLAYER_COLORS[b.ownerSlot] || '#999'})`,
+                        cursor: b.name === 'Lance Missile' ? 'pointer' : 'default'
                       }}
                       fill={PLAYER_COLORS[b.ownerSlot] || '#999'}
+                      onClick={b.name === 'Lance Missile' ? (e) => handleLanceMissileClick(e, b) : undefined}
                     >
                       {b.icon}
                     </text>
@@ -638,33 +732,33 @@ function App() {
                 ))}
                 
                 {/* Missiles */}
-                {missiles.map((missile, i) => (
-                  <circle
-                    key={`missile-${missile.id}`}
-                    cx={missile.x}
-                    cy={missile.y}
-                    r={3}
-                    fill={PLAYER_COLORS[missile.ownerSlot]}
-                    stroke="white"
-                    strokeWidth={1}
-                  />
-                ))}
-                
+                {missiles.map((missile, i) => {
+                  // Cherche le type de missile pour ajuster la taille
+                  const missileDef = MISSILE_TYPES.find(m => m.type === missile.type);
+                  const radius = missileDef ? missileDef.radius : 3;
+                  return (
+                    <circle
+                      key={`missile-${missile.id}`}
+                      cx={missile.x}
+                      cy={missile.y}
+                      r={radius}
+                      fill={PLAYER_COLORS[missile.ownerSlot]}
+                      stroke="white"
+                      strokeWidth={1}
+                    />
+                  );
+                })}
                 {/* Drones */}
                 {drones.map((drone, i) => {
-                  // Calculer l'angle vers la cible
                   const dx = drone.targetX - drone.x;
                   const dy = drone.targetY - drone.y;
                   const angle = Math.atan2(dy, dx);
-                  
-                  // Points du triangle (pointe vers la droite par défaut)
                   const size = 6;
                   const points = [
                     `${drone.x + size * Math.cos(angle)},${drone.y + size * Math.sin(angle)}`,
                     `${drone.x + size * Math.cos(angle + 2.6)},${drone.y + size * Math.sin(angle + 2.6)}`,
                     `${drone.x + size * Math.cos(angle - 2.6)},${drone.y + size * Math.sin(angle - 2.6)}`
                   ].join(' ');
-                  
                   return (
                     <polygon
                       key={`drone-${drone.id}`}
@@ -675,7 +769,6 @@ function App() {
                     />
                   );
                 })}
-                
                 {/* Fantôme du bâtiment à placer */}
                 {pendingBuilding && lastClick && (
                   <text
@@ -760,6 +853,72 @@ function App() {
                 Cliquez sur la map pour placer : <span style={{fontWeight:'bold'}}>{pendingBuilding.icon} {pendingBuilding.name}</span>
               </div>
             )}
+            {/* Menu de sélection du type de missile */}
+            {missileMenu && (
+              <div
+                style={{
+                  position: 'fixed',
+                  left: missileMenu.x,
+                  top: missileMenu.y,
+                  background: '#fff',
+                  border: '2px solid #b71c1c',
+                  borderRadius: 10,
+                  boxShadow: '0 4px 16px #0006',
+                  zIndex: 1001,
+                  padding: 10,
+                  minWidth: 220,
+                }}
+                onClick={e => e.stopPropagation()}
+              >
+                <div style={{fontWeight:'bold',marginBottom:8}}>Choisir le type de missile :</div>
+                {MISSILE_TYPES.map(missile => (
+                  <div
+                    key={missile.type}
+                    style={{
+                      cursor: resources.datas >= missile.cost ? 'pointer' : 'not-allowed',
+                      padding: '8px 10px',
+                      borderRadius: 6,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 8,
+                      fontSize: 16,
+                      backgroundColor: resources.datas >= missile.cost ? missile.color + '22' : '#f0f0f0',
+                      color: resources.datas >= missile.cost ? '#000' : '#999',
+                      border: resources.datas >= missile.cost ? 'none' : '1px solid #ddd',
+                      marginBottom: 4
+                    }}
+                    onClick={() => {
+                      if (resources.datas >= missile.cost) {
+                        setMissileMenu(null);
+                        socket.emit('set_barrack_missile_type', {
+                          buildingId: missileMenu.buildingId,
+                          missileType: missile.type,
+                          sessionId
+                        });
+                      }
+                    }}
+                  >
+                    <span style={{fontWeight:'bold'}}>{missile.label}</span>
+                    <span style={{fontSize:14}}>Coût : {missile.cost.toLocaleString()} datas</span>
+                  </div>
+                ))}
+                <div
+                  style={{marginTop:8,textAlign:'right',fontSize:13,cursor:'pointer',color:'#888'}}
+                  onClick={() => {
+                    setMissileMenu(null);
+                    // Si aucun missile n'a été sélectionné, tirer le moins cher
+                    const affordable = MISSILE_TYPES.filter(m => resources.datas >= m.cost);
+                    const cheapest = affordable.sort((a, b) => a.cost - b.cost)[0];
+                    if (cheapest) fireMissile(missileMenu.buildingId, cheapest.type);
+                  }}
+                >Tirer le moins cher</div>
+                <div
+                  style={{marginTop:4,textAlign:'right',fontSize:13,cursor:'pointer',color:'#888'}}
+                  onClick={() => setMissileMenu(null)}
+                >Annuler</div>
+              </div>
+            )}
           </div>
         </>
       )}
@@ -807,6 +966,12 @@ function App() {
           Réinitialiser
         </button>
       </div>
+      {/* Message d'erreur */}
+      {errorMsg && (
+        <div style={{position:'fixed',top:20,left:0,right:0,textAlign:'center',color:'#fff',background:'#b71c1c',padding:10,borderRadius:8,zIndex:3000,fontWeight:'bold',fontSize:18,boxShadow:'0 2px 8px #0007'}}>
+          {errorMsg}
+        </div>
+      )}
     </div>
   );
 }
