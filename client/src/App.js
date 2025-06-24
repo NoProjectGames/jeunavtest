@@ -9,8 +9,9 @@ const BUILDINGS = [
   { name: 'Lance Missile', icon: '🚀', cost: 50000 },
   { name: 'Crypto Farm', icon: '💻', cost: 25000 },
   { name: 'Château', icon: '🏛️', cost: 35000 },
-  { name: 'Antimissile', icon: '��️', cost: 20000 },
+  { name: 'Antimissile', icon: '🛡️', cost: 20000 },
   { name: 'Usine de Drones', icon: '🤖', cost: 55000 },
+  { name: 'Centre Médical', icon: '🏥', cost: 100000 },
 ];
 const INITIAL_RESOURCES = { gold: 30000, datas: 100000, population: 10, populationMax: 20, cryptoPerSec: 1000 };
 const BASE_GOLD_PER_SEC = 1000;
@@ -456,7 +457,7 @@ function App() {
     if (!gameStarted) return;
     const rect = svgRef.current.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
-    const y = (e.clientY - rect.top) / zoom;
+    const y = ((e.clientY - rect.top) / rect.height) * svgHeight;
     if (pendingBuilding) {
       // Vérifier que le clic est dans la zone de construction (zone grise)
       const mapTop = svgHeight * 0.2;

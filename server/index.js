@@ -901,6 +901,26 @@ function startGameForSession(sessionId) {
         drone.y += (dy/dist) * DRONE_SPEED;
       }
     });
+    // --- Régénération Centre Médical ---
+    if (!session._lastRegenTick) session._lastRegenTick = Date.now();
+    const now = Date.now();
+    if (now - session._lastRegenTick >= 1000) {
+      let healthChanged = false;
+      for (let slot = 0; slot < session.players.length; slot++) {
+        if (session.playerHealth[slot] > 0) {
+          const hasMedical = session.buildings.some(b => b.ownerSlot === slot && b.name === 'Centre Médical');
+          if (hasMedical) {
+            const before = session.playerHealth[slot];
+            session.playerHealth[slot] = Math.min(100, session.playerHealth[slot] + 1);
+            if (session.playerHealth[slot] !== before) healthChanged = true;
+          }
+        }
+      }
+      if (healthChanged) {
+        io.to(sessionId).emit('health_update', session.playerHealth);
+      }
+      session._lastRegenTick = now;
+    }
     // Collisions par session
     checkMissileCollisionsForSession(session);
     checkMissileToMissileCollisionsForSession(session);
