@@ -43,6 +43,11 @@ const MISSILE_TYPES = [
   { type: 'furtif', label: 'Missile furtif', cost: 50000, speed: 4, damage: 2, color: '#616161', radius: 5 }
 ];
 
+// --- Standardisation des coordonnées ---
+// Toutes les coordonnées sont exprimées sur une largeur de carte fixe (MAP_WIDTH)
+// pour garantir la cohérence entre clients et serveur, peu importe la taille d'écran.
+const MAP_WIDTH = 1920;
+
 function getPlayerIndex(players, myId, myIndex) {
   if (myIndex !== null && myIndex !== undefined) return myIndex;
   return players.findIndex(p => p && p.id === myId);
@@ -92,10 +97,9 @@ function App() {
   const [errorMsg, setErrorMsg] = useState("");
   const [lastMissileType, setLastMissileType] = useState(null); // Pour mémoriser le dernier type sélectionné
 
-  const windowWidth = window.innerWidth;
   const svgHeight = 700;
-  const SEGMENT_WIDTH = windowWidth / NB_PLAYERS;
-  const totalWidth = windowWidth;
+  const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
+  const totalWidth = MAP_WIDTH;
 
   useEffect(() => {
     console.log('Connecting to server...');
@@ -250,7 +254,7 @@ function App() {
       const effectiveSegmentsByPlayer = Object.keys(segmentsByPlayer).length > 0
         ? segmentsByPlayer
         : (mySlot !== null && mySlot >= 0 ? { [mySlot]: mySlot } : {});
-      const SEGMENT_WIDTH_LOCAL = window.innerWidth / NB_PLAYERS;
+      const SEGMENT_WIDTH_LOCAL = MAP_WIDTH / NB_PLAYERS;
       const mySegments = Object.entries(effectiveSegmentsByPlayer)
         .filter(([segIdx, owner]) => owner === mySlot)
         .map(([segIdx]) => parseInt(segIdx));
@@ -451,7 +455,7 @@ function App() {
     if (isEliminated) return;
     if (!gameStarted) return;
     const rect = svgRef.current.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / zoom;
+    const x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
     const y = (e.clientY - rect.top) / zoom;
     if (pendingBuilding) {
       // Vérifier que le clic est dans la zone de construction (zone grise)
@@ -602,7 +606,7 @@ function App() {
             }}>
               <svg
                 ref={svgRef}
-                width={totalWidth}
+                width={MAP_WIDTH}
                 height={svgHeight}
                 style={{
                   display: 'block',
@@ -612,6 +616,9 @@ function App() {
                   cursor: isDragging ? 'grabbing' : (pendingBuilding ? 'crosshair' : 'grab'),
                   transform: `scale(${zoom}) translate(${mapOffset.x / zoom}px, ${mapOffset.y / zoom}px)`,
                   transformOrigin: `${zoomCenter.x}% ${zoomCenter.y}%`,
+                  maxWidth: '100vw',
+                  height: 'auto',
+                  width: '100%'
                 }}
                 onClick={handleMapClickForBuild}
                 onWheel={handleWheel}
@@ -621,7 +628,7 @@ function App() {
                 onContextMenu={handleContextMenu}
               >
                 {/* Route principale */}
-                <rect x={0} y={svgHeight * 0.2} width={totalWidth} height={svgHeight * 0.6} fill="#e0e0e0" rx={30} />
+                <rect x={0} y={svgHeight * 0.2} width={MAP_WIDTH} height={svgHeight * 0.6} fill="#e0e0e0" rx={30} />
                 {/* Segments et bases */}
                 {Array.from({ length: NB_PLAYERS }).map((_, segIdx) => {
                   const x = segIdx * SEGMENT_WIDTH;
