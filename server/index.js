@@ -1067,7 +1067,7 @@ function stopDroneFactoryTimerForSession(session, factory) {
   }
 }
 function createDroneFromFactoryForSession(session, factory) {
-  // Trouver une cible ennemie (bâtiment ou base)
+  // Trouver une cible ennemie (bâtiment uniquement)
   const screenWidth = 1920;
   const segmentWidth = screenWidth / 8;
   const segmentStart = factory.ownerSlot * segmentWidth;
@@ -1075,7 +1075,7 @@ function createDroneFromFactoryForSession(session, factory) {
   const segmentMidpoint = segmentStart + segmentWidth / 2;
   const direction = factory.x < segmentMidpoint ? -1 : 1;
 
-  // Chercher d'abord des bâtiments ennemis dans la bonne direction
+  // Chercher uniquement des bâtiments ennemis dans la bonne direction
   const enemyBuildings = session.buildings.filter(b => {
     if (b.ownerSlot === factory.ownerSlot) return false;
     if (direction === 1) {
@@ -1085,56 +1085,20 @@ function createDroneFromFactoryForSession(session, factory) {
     }
   });
 
-  let target = null;
-  if (enemyBuildings.length > 0) {
-    const randomBuilding = enemyBuildings[Math.floor(Math.random() * enemyBuildings.length)];
-    target = {
-      x: randomBuilding.x,
-      y: randomBuilding.y,
-      type: 'building',
-      id: randomBuilding.id || 'building'
-    };
-  } else {
-    // Sinon, cibler une base ennemie
-    if (direction === 1) {
-      for (let i = factory.ownerSlot + 1; i < 8; i++) {
-        if (session.playerHealth[i] > 0) {
-          const baseX = i * segmentWidth + segmentWidth / 2;
-          target = { x: baseX, y: 350, type: 'base', id: `player_${i}` };
-          break;
-        }
-      }
-      if (!target && factory.ownerSlot !== 7 && session.playerHealth[7] > 0) {
-        const baseX = 7 * segmentWidth + segmentWidth / 2;
-        target = { x: baseX, y: 350, type: 'base', id: `player_7` };
-      }
-    } else {
-      for (let i = factory.ownerSlot - 1; i >= 0; i--) {
-        if (session.playerHealth[i] > 0) {
-          const baseX = i * segmentWidth + segmentWidth / 2;
-          target = { x: baseX, y: 350, type: 'base', id: `player_${i}` };
-          break;
-        }
-      }
-      if (!target && factory.ownerSlot !== 0 && session.playerHealth[0] > 0) {
-        const baseX = 0 * segmentWidth + segmentWidth / 2;
-        target = { x: baseX, y: 350, type: 'base', id: `player_0` };
-      }
-    }
-    // Si aucune cible trouvée, cible par défaut
-    if (!target) {
-      if (direction === 1) {
-        const defaultTargetSlot = (factory.ownerSlot + 1) % 8;
-        const baseX = defaultTargetSlot * segmentWidth + segmentWidth / 2;
-        target = { x: baseX, y: 350, type: 'base', id: `player_${defaultTargetSlot}` };
-      } else {
-        const defaultTargetSlot = (factory.ownerSlot - 1 + 8) % 8;
-        const baseX = defaultTargetSlot * segmentWidth + segmentWidth / 2;
-        target = { x: baseX, y: 350, type: 'base', id: `player_${defaultTargetSlot}` };
-      }
-    }
+  if (enemyBuildings.length === 0) {
+    // Aucun bâtiment ennemi dans la direction : ne rien faire
+    return;
   }
-  if (!target) return;
+
+  // Cibler un bâtiment ennemi aléatoire
+  const randomBuilding = enemyBuildings[Math.floor(Math.random() * enemyBuildings.length)];
+  const target = {
+    x: randomBuilding.x,
+    y: randomBuilding.y,
+    type: 'building',
+    id: randomBuilding.id || 'building'
+  };
+
   const drone = {
     id: session.droneIdCounter++,
     x: factory.x,
@@ -1214,6 +1178,10 @@ function checkMissileToBuildingCollisionsForSession(session) {
         // Si c'est un Lance Missile détruit, arrêter son timer
         if (building.name === 'Lance Missile') {
           stopBarrackTimerForSession(session, building);
+        }
+        // Si c'est une Usine de Drones détruite, arrêter son timer
+        if (building.name === 'Usine de Drones') {
+          stopDroneFactoryTimerForSession(session, building);
         }
         // Supprimer le bâtiment détruit
         session.buildings.splice(j, 1);
