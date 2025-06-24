@@ -72,7 +72,6 @@ function App() {
   const [myId, setMyId] = useState(null);
   const [myIndex, setMyIndex] = useState(null);
   const [buildMenu, setBuildMenu] = useState(null);
-  const [pendingBuilding, setPendingBuilding] = useState(null);
   const [buildings, setBuildings] = useState([]);
   const [resources, setResources] = useState(INITIAL_RESOURCES);
   const [missiles, setMissiles] = useState([]);
@@ -332,13 +331,85 @@ function App() {
     setLastMissileType(missileDef.type);
   }
 
+  function handleMapClickForBuild(e) {
+    if (isEliminated) return;
+    if (!gameStarted) return;
+    // Utilisation de getScreenCTM pour une conversion fiable
+    const svg = svgRef.current;
+    let x, y;
+    if (svg && typeof svg.createSVGPoint === 'function') {
+      const pt = svg.createSVGPoint();
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+      const ctm = svg.getScreenCTM();
+      if (ctm) {
+        const svgP = pt.matrixTransform(ctm.inverse());
+        x = svgP.x;
+        y = svgP.y;
+      } else {
+        // Fallback si getScreenCTM échoue
+        const rect = svg.getBoundingClientRect();
+        x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
+        y = ((e.clientY - rect.top) / rect.height) * svgHeight;
+      }
+    } else {
+      // Fallback si createSVGPoint n'est pas disponible
+      const rect = svgRef.current.getBoundingClientRect();
+      x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
+      y = ((e.clientY - rect.top) / rect.height) * svgHeight;
+    }
+    
+    // Vérifier que le clic est dans la zone de construction (zone grise)
+    const mapTop = svgHeight * 0.2;
+    const mapBottom = svgHeight * 0.8;
+    // Trouver le segment cliqué
+    const segIdx = Math.floor(x / SEGMENT_WIDTH);
+    const ownerSlot = effectiveSegmentsByPlayer[segIdx] !== undefined ? effectiveSegmentsByPlayer[segIdx] : segIdx;
+    
+    if (mySlot < 0 || ownerSlot !== mySlot || y < mapTop || y > mapBottom) {
+      setLastClick({ x: Math.round(x), y: Math.round(y), error: true });
+      return;
+    }
+    
+    // Ouvrir le menu de construction à la position du clic
+    setBuildMenu({ x: e.clientX, y: e.clientY });
+    setLastClick({ x: Math.round(x), y: Math.round(y), error: false });
+  }
+
   function handleBuildingSelect(building) {
     setBuildMenu(null);
-    setPendingBuilding(building);
+    
+    // Vérifier si le joueur a assez de crypto pour construire
+    if (resources.gold < building.cost) {
+      setErrorMsg("Pas assez de crypto pour construire ce bâtiment.");
+      setTimeout(() => setErrorMsg(""), 2000);
+      return;
+    }
+    
+    // Utiliser les coordonnées du dernier clic pour placer le bâtiment
+    if (lastClick && !lastClick.error) {
+      // Créer le bâtiment avec l'information du propriétaire
+      const buildingToPlace = { 
+        x: lastClick.x, 
+        y: lastClick.y, 
+        ...building, 
+        ownerSlot: mySlot 
+      };
+      
+      // Déduire le coût du bâtiment des ressources
+      setResources(prev => ({
+        ...prev,
+        gold: prev.gold - building.cost
+      }));
+      
+      // Envoyer le bâtiment au serveur
+      if (playerHealth[buildingToPlace.ownerSlot] === 0) return;
+      socket.emit('place_building', { ...buildingToPlace, sessionId });
+    }
   }
+
   function handleCloseMenu() {
     setBuildMenu(null);
-    setPendingBuilding(null);
   }
 
   // Gestion du zoom avec la molette de la souris
@@ -449,68 +520,6 @@ function App() {
         setSessionError("");
       }
     });
-  }
-
-  // Gestion du clic gauche sur la carte pour la construction de bâtiments
-  function handleMapClickForBuild(e) {
-    if (isEliminated) return;
-    if (!gameStarted) return;
-    // Utilisation de getScreenCTM pour une conversion fiable
-    const svg = svgRef.current;
-    let x, y;
-    if (svg && typeof svg.createSVGPoint === 'function') {
-      const pt = svg.createSVGPoint();
-      pt.x = e.clientX;
-      pt.y = e.clientY;
-      const ctm = svg.getScreenCTM();
-      if (ctm) {
-        const svgP = pt.matrixTransform(ctm.inverse());
-        x = svgP.x;
-        y = svgP.y;
-      } else {
-        // Fallback si getScreenCTM échoue
-        const rect = svg.getBoundingClientRect();
-        x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
-        y = ((e.clientY - rect.top) / rect.height) * svgHeight;
-      }
-    } else {
-      // Fallback si createSVGPoint n'est pas disponible
-      const rect = svgRef.current.getBoundingClientRect();
-      x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
-      y = ((e.clientY - rect.top) / rect.height) * svgHeight;
-    }
-    if (pendingBuilding) {
-      // Vérifier que le clic est dans la zone de construction (zone grise)
-      const mapTop = svgHeight * 0.2;
-      const mapBottom = svgHeight * 0.8;
-      // Trouver le segment cliqué
-      const segIdx = Math.floor(x / SEGMENT_WIDTH);
-      const ownerSlot = effectiveSegmentsByPlayer[segIdx] !== undefined ? effectiveSegmentsByPlayer[segIdx] : segIdx;
-      if (mySlot < 0 || ownerSlot !== mySlot || y < mapTop || y > mapBottom) {
-        setLastClick({ x: Math.round(x), y: Math.round(y), error: true });
-        return;
-      }
-      // Vérifier si le joueur a assez de crypto pour construire
-      if (resources.gold < pendingBuilding.cost) {
-        setLastClick({ x: Math.round(x), y: Math.round(y), error: true });
-        return;
-      }
-      // Créer le bâtiment avec l'information du propriétaire
-      const building = { x, y, ...pendingBuilding, ownerSlot: mySlot };
-      // Déduire le coût du bâtiment des ressources
-      setResources(prev => ({
-        ...prev,
-        gold: prev.gold - pendingBuilding.cost
-      }));
-      // Envoyer le bâtiment au serveur
-      if (playerHealth[building.ownerSlot] === 0) return;
-      socket.emit('place_building', { ...building, sessionId });
-      setPendingBuilding(null);
-      setLastClick({ x: Math.round(x), y: Math.round(y), error: false });
-    } else {
-      setBuildMenu({ x: e.clientX, y: e.clientY });
-      setLastClick({ x: Math.round(x), y: Math.round(y), error: false });
-    }
   }
 
   if (inLobby) {
@@ -635,7 +644,7 @@ function App() {
                   background: '#181818',
                   borderRadius: 20,
                   boxShadow: '0 0 30px #000a',
-                  cursor: isDragging ? 'grabbing' : (pendingBuilding ? 'crosshair' : 'grab'),
+                  cursor: isDragging ? 'grabbing' : 'grab',
                   transform: `scale(${zoom}) translate(${mapOffset.x / zoom}px, ${mapOffset.y / zoom}px)`,
                   transformOrigin: `${zoomCenter.x}% ${zoomCenter.y}%`,
                   maxWidth: '100vw',
@@ -798,20 +807,6 @@ function App() {
                     />
                   );
                 })}
-                {/* Fantôme du bâtiment à placer */}
-                {pendingBuilding && lastClick && (
-                  <text
-                    x={lastClick.x}
-                    y={lastClick.y}
-                    fontSize={24 / 2.5}
-                    textAnchor="middle"
-                    alignmentBaseline="middle"
-                    opacity={0.5}
-                    style={{ pointerEvents: 'none' }}
-                  >
-                    {pendingBuilding.icon}
-                  </text>
-                )}
                 {/* Point rouge pour debug clic */}
                 {lastClick && (
                   <circle cx={lastClick.x} cy={lastClick.y} r={8 / 2.5} fill={lastClick.error ? "orange" : "#e53935"} stroke="#fff" strokeWidth={2 / 2.5} />
@@ -874,12 +869,6 @@ function App() {
                   style={{marginTop:8,textAlign:'right',fontSize:13,cursor:'pointer',color:'#888'}}
                   onClick={handleCloseMenu}
                 >Annuler</div>
-              </div>
-            )}
-            {/* Indication de placement */}
-            {pendingBuilding && (
-              <div style={{position:'fixed',left:0,right:0,bottom:30,textAlign:'center',color:'#fff',fontSize:20,zIndex:1001}}>
-                Cliquez sur la map pour placer : <span style={{fontWeight:'bold'}}>{pendingBuilding.icon} {pendingBuilding.name}</span>
               </div>
             )}
             {/* Menu de sélection du type de missile */}
