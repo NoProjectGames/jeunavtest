@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { io } from 'socket.io-client';
 
-const socket = io('https://jeunavtest.onrender.com'); //https://jeunavtest.onrender.com //http://localhost:3001
+const socket = io('http://localhost:3001'); //https://jeunavtest.onrender.com //http://localhost:3001
 
 const NB_PLAYERS = 8;
 const BASE_VIEW_RATIO = 0.7;
@@ -71,6 +71,12 @@ function App() {
   const svgRef = useRef();
   const [inLobby, setInLobby] = useState(true);
   const [pseudo, setPseudo] = useState("");
+  const [sessionList, setSessionList] = useState([]); // Liste des sessions
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionError, setSessionError] = useState("");
+  const [sessionName, setSessionName] = useState(""); // Pour créer une session
+  const [sessionId, setSessionId] = useState(null); // Id de la session rejointe
+  const [joining, setJoining] = useState(false); // Pour désactiver les boutons pendant la connexion
 
   const windowWidth = window.innerWidth;
   const svgHeight = 700;
@@ -90,7 +96,7 @@ function App() {
     });
     
     socket.on('players_update', (players) => {
-      console.log('Players update received:', players);
+      console.log('Players update received:', JSON.stringify(players, null, 2));
       setPlayers(players);
     });
     
@@ -133,7 +139,7 @@ function App() {
     
     // Réception des mises à jour des bâtiments
     socket.on('buildings_update', (buildings) => {
-      console.log('Buildings update received:', buildings);
+      console.log('Buildings update received:', buildings.map(b => ({id: b.id, name: b.name, x: b.x, y: b.y})));
       setBuildings(buildings);
     });
     
@@ -157,6 +163,13 @@ function App() {
       setDrones(newDrones);
     });
     
+    // Gestion des sessions (nouveau)
+    socket.on('sessions_list', (list) => {
+      console.log('sessions_list reçu:', list);
+      setSessionList(list);
+      setSessionLoading(false);
+    });
+    
     return () => {
       socket.off('connect');
       socket.off('disconnect');
@@ -171,6 +184,7 @@ function App() {
       socket.off('missiles_update', setMissiles);
       socket.off('health_update', setPlayerHealth);
       socket.off('drones_update', setDrones);
+      socket.off('sessions_list');
     };
   }, []);
 
@@ -210,6 +224,19 @@ function App() {
     return () => clearInterval(interval);
   }, [gameStarted, buildings, baseX]);
 
+  // Quand on rejoint une session, reset les états du jeu
+  useEffect(() => {
+    if (sessionId && !inLobby) {
+      setBuildings([]);
+      setMissiles([]);
+      setDrones([]);
+      setPlayerHealth(Array(8).fill(100));
+      setGameStarted(false);
+      setCountdown(null);
+      setResources(INITIAL_RESOURCES);
+    }
+  }, [sessionId, inLobby]);
+
   function handleMapClick(e) {
     if (isEliminated) return;
     if (!gameStarted) return;
@@ -243,7 +270,7 @@ function App() {
       
       // Envoyer le bâtiment au serveur
       if (playerHealth[building.ownerSlot] === 0) return;
-      socket.emit('place_building', building);
+      socket.emit('place_building', { ...building, sessionId });
       
       setPendingBuilding(null);
       setLastClick({ x: Math.round(x), y: Math.round(y), error: false });
@@ -316,7 +343,58 @@ function App() {
   // Log pour debug : voir la structure de players à chaque rendu
   console.log('players for render:', players);
 
+  // Log pour debug : voir la liste des bâtiments à chaque re-render
+  console.log('RENDER buildings:', buildings.map(b => b.id));
+
   const isEliminated = mySlot >= 0 && playerHealth[mySlot] === 0;
+
+  // Fonction pour rafraîchir la liste des sessions
+  function refreshSessions() {
+    setSessionLoading(true);
+    socket.emit('list_sessions');
+    // Timeout de secours : si pas de réponse en 3s, on débloque
+    setTimeout(() => {
+      setSessionLoading(false);
+    }, 3000);
+  }
+
+  // Appel initial de la liste des sessions à l'ouverture du lobby
+  useEffect(() => {
+    if (inLobby) {
+      refreshSessions();
+    }
+  }, [inLobby]);
+
+  // Fonction pour créer une session
+  function handleCreateSession() {
+    if (!sessionName.trim()) return;
+    setJoining(true);
+    socket.emit('create_session', sessionName, (newSessionId) => {
+      setSessionId(newSessionId);
+      handleJoinSession(newSessionId);
+    });
+  }
+
+  // Fonction pour rejoindre une session
+  function handleJoinSession(id) {
+    if (!pseudo.trim()) {
+      setSessionError('Veuillez entrer un pseudo.');
+      return;
+    }
+    setJoining(true);
+    socket.emit('join_session', { sessionId: id, pseudo }, (res) => {
+      if (res && res.error) {
+        setSessionError(res.error);
+        setJoining(false);
+      } else {
+        setSessionId(id);
+        setMyIndex(res.index);
+        setInLobby(false);
+        setJoining(false);
+        setSessionError("");
+      }
+    });
+  }
 
   if (inLobby) {
     return (
@@ -328,14 +406,41 @@ function App() {
           value={pseudo}
           onChange={e => setPseudo(e.target.value)}
           style={{padding: '10px', fontSize: '1.2em', marginBottom: '20px', borderRadius: '5px', border: 'none'}}
+          disabled={joining}
         />
-        <button
-          onClick={() => setInLobby(false)}
-          style={{padding: '10px 30px', fontSize: '1.2em', borderRadius: '5px', border: 'none', background: '#4a90e2', color: '#fff', cursor: 'pointer'}}
-          disabled={!pseudo.trim()}
-        >
-          Jouer
-        </button>
+        <div style={{marginBottom: 20}}>
+          <button onClick={refreshSessions} disabled={sessionLoading || joining} style={{marginRight: 10}}>🔄 Rafraîchir</button>
+        </div>
+        <div style={{background:'#333',padding:20,borderRadius:10,minWidth:320}}>
+          <h2>Parties disponibles</h2>
+          {sessionLoading ? <div>Chargement...</div> : (
+            <>
+              {sessionList.length === 0 && <div>Aucune partie disponible.</div>}
+              <ul style={{listStyle:'none',padding:0}}>
+                {sessionList.map(s => (
+                  <li key={s.id} style={{marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                    <span><b>{s.name}</b> ({s.players}/8)</span>
+                    <button onClick={() => handleJoinSession(s.id)} disabled={joining || !pseudo.trim() || s.players >= 8} style={{marginLeft:10}}>Rejoindre</button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          <div style={{marginTop:20}}>
+            <input
+              type="text"
+              placeholder="Nom de la partie"
+              value={sessionName}
+              onChange={e => setSessionName(e.target.value)}
+              style={{padding:'8px',fontSize:'1em',borderRadius:5,border:'none',marginRight:10}}
+              disabled={joining}
+            />
+            <button onClick={handleCreateSession} disabled={joining || !pseudo.trim() || !sessionName.trim()}>
+              Créer une partie
+            </button>
+          </div>
+          {sessionError && <div style={{color:'red',marginTop:10}}>{sessionError}</div>}
+        </div>
       </div>
     );
   }
@@ -354,6 +459,11 @@ function App() {
       style={{ textAlign: 'center', width: '100vw', height: '100vh', margin: 0, padding: 0, overflow: 'hidden', background: '#222' }}
     >
       <h1 style={{ color: '#fff', margin: 0, padding: 10 }}>RTS Navigateur.io</h1>
+      {sessionId && (
+        <div style={{color:'#4a90e2',fontWeight:'bold',fontSize:18,marginBottom:8}}>
+          Partie : {sessionList.find(s => s.id === sessionId)?.name || sessionId}
+        </div>
+      )}
       {/* Fenêtre ressources */}
       <div style={{
         position: 'fixed',
@@ -426,6 +536,7 @@ function App() {
                 {Array.from({ length: NB_PLAYERS }).map((_, segIdx) => {
                   const x = segIdx * SEGMENT_WIDTH;
                   const player = players[segIdx];
+                  const pseudo = player && typeof player.pseudo === 'string' ? player.pseudo : '';
                   const isMe = segIdx === mySlot;
                   return (
                     <g key={segIdx}>
@@ -476,8 +587,8 @@ function App() {
                         >
                           {`${playerHealth[segIdx]}%`}
                         </text>
-                        {/* Affichage du pseudo sous la vie pour chaque joueur (debug robuste) */}
-                        {player && typeof player.pseudo === 'string' && player.pseudo.trim() !== '' && (
+                        {/* Affichage du pseudo sous la vie pour chaque joueur (robuste) */}
+                        {pseudo && (
                           <text
                             x={x + SEGMENT_WIDTH / 2}
                             y={svgHeight * 0.89}
@@ -486,7 +597,7 @@ function App() {
                             fontWeight="bold"
                             fill={PLAYER_COLORS[segIdx]}
                           >
-                            {player.pseudo}
+                            {pseudo}
                           </text>
                         )}
                       </g>
@@ -494,8 +605,8 @@ function App() {
                   );
                 })}
                 {/* Bâtiments placés */}
-                {buildings.map((b, i) => (
-                  <g key={i}>
+                {buildings.map((b) => (
+                  <g key={b.id + '-' + b.x + '-' + b.y}>
                     {/* Cercle de portée pour les antimissiles */}
                     {b.name === 'Antimissile' && (
                       <circle
@@ -682,7 +793,7 @@ function App() {
       )}
       <div className="game-controls">
         <button 
-          onClick={() => socket.emit('start_countdown')}
+          onClick={() => socket.emit('start_countdown', { sessionId })}
           disabled={gameStarted || countdown !== null}
           className="start-button"
         >
@@ -690,7 +801,7 @@ function App() {
         </button>
         
         <button 
-          onClick={() => socket.emit('reset_game')}
+          onClick={() => socket.emit('reset_game', { sessionId })}
           className="reset-button"
         >
           Réinitialiser
