@@ -12,6 +12,30 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3001;
 
+// Gestion des sessions (parties)
+let sessions = {};
+
+function createSession(sessionName) {
+  // Génère un id unique simple (timestamp + random)
+  const sessionId = `${Date.now()}_${Math.floor(Math.random()*10000)}`;
+  sessions[sessionId] = {
+    name: sessionName,
+    players: Array(8).fill(null),
+    buildings: [],
+    missiles: [],
+    drones: [],
+    playerHealth: Array(8).fill(100),
+    countdown: null,
+    countdownValue: 0,
+    gameStarted: false,
+    missileIdCounter: 0,
+    droneIdCounter: 0,
+    barrackTimers: new Map(),
+    droneFactoryTimers: new Map(),
+  };
+  return sessionId;
+}
+
 let players = Array(8).fill(null); // slots fixes
 let buildings = []; // Tous les bâtiments placés par tous les joueurs
 let missiles = []; // Tous les missiles de toutes les casernes
@@ -644,89 +668,62 @@ function checkDroneCollisions() {
 }
 
 io.on('connection', (socket) => {
-  // Cherche une place libre
-  const freeIndex = players.findIndex(p => p === null);
-  if (freeIndex === -1) {
-    socket.emit('lobby_full');
-    socket.disconnect();
-    return;
-  }
+  // Liste des sessions
+  socket.on('list_sessions', () => {
+    // Envoie la liste des sessions (id + nom + nb joueurs)
+    const list = Object.entries(sessions).map(([id, s]) => ({
+      id,
+      name: s.name,
+      players: s.players.filter(Boolean).length
+    }));
+    socket.emit('sessions_list', list);
+  });
 
-  // Place le joueur dans le slot
-  players[freeIndex] = { id: socket.id, pseudo: null };
-  socket.emit('your_index', freeIndex);
-  io.emit('players_update', players);
-  
-  // Envoyer les bâtiments existants au nouveau joueur
-  socket.emit('buildings_update', buildings);
-  
-  // Envoyer les missiles existants au nouveau joueur
-  socket.emit('missiles_update', missiles);
-  
-  // Envoyer la vie actuelle au nouveau joueur
-  socket.emit('health_update', playerHealth);
+  // Créer une session
+  socket.on('create_session', (sessionName, cb) => {
+    const sessionId = createSession(sessionName);
+    cb && cb(sessionId);
+    // Broadcast la nouvelle liste
+    io.emit('sessions_list', Object.entries(sessions).map(([id, s]) => ({
+      id,
+      name: s.name,
+      players: s.players.filter(Boolean).length
+    })));
+  });
 
-  // Nouveau : gestion du pseudo
-  socket.on('set_pseudo', ({ pseudo, index }) => {
-    console.log('set_pseudo reçu:', pseudo, 'pour index:', index);
-    if (typeof index === 'number' && players[index] && players[index].id === socket.id) {
-      console.log('Avant maj:', JSON.stringify(players[index]));
-      players[index].pseudo = pseudo;
-      console.log('Après maj:', JSON.stringify(players[index]));
-      io.emit('players_update', players);
-    } else {
-      console.log('set_pseudo ignoré: index ou id non valide', index, players[index] && players[index].id, socket.id);
+  // Rejoindre une session
+  socket.on('join_session', ({ sessionId, pseudo }, cb) => {
+    const session = sessions[sessionId];
+    if (!session) {
+      cb && cb({ error: 'Session not found' });
+      return;
+    }
+    // Cherche une place libre
+    const freeIndex = session.players.findIndex(p => p === null);
+    if (freeIndex === -1) {
+      cb && cb({ error: 'Session full' });
+      return;
+    }
+    // Place le joueur dans le slot
+    session.players[freeIndex] = { id: socket.id, pseudo };
+    socket.join(sessionId);
+    socket.sessionId = sessionId;
+    socket.playerIndex = freeIndex;
+    cb && cb({ index: freeIndex });
+    // Envoie l'état de la session au joueur
+    socket.emit('your_index', freeIndex);
+    io.to(sessionId).emit('players_update', session.players);
+    socket.emit('buildings_update', session.buildings);
+    socket.emit('missiles_update', session.missiles);
+    socket.emit('health_update', session.playerHealth);
+    // Démarrage du compte à rebours si 2 joueurs ou plus
+    if (session.players.filter(Boolean).length >= 2 && !session.gameStarted) {
+      // ... (à adapter)
     }
   });
 
-  // Démarrage du compte à rebours si 2 joueurs ou plus
-  if (players.filter(Boolean).length >= 2 && !gameStarted) {
-    startCountdown();
-  }
-
-  // Gestion des placements de bâtiments
-  socket.on('place_building', (building) => {
-    if (!gameStarted) return;
-    
-    // Ajouter le bâtiment à la liste globale
-    buildings.push(building);
-    
-    // Si c'est un Lance Missile, démarrer son timer de production de missiles
-    if (building.name === 'Lance Missile') {
-      console.log('🚀 Starting missile production for new barrack:', building.ownerSlot, building.x, building.y);
-      startBarrackTimer(building);
-    }
-    
-    // Si c'est une Usine de Drones, démarrer son timer de production de drones
-    if (building.name === 'Usine de Drones') {
-      console.log('🤖 Starting drone production for new factory:', building.ownerSlot, building.x, building.y);
-      startDroneFactoryTimer(building);
-    }
-    
-    // Envoyer la mise à jour à tous les joueurs
-    io.emit('buildings_update', buildings);
-  });
-
-  socket.on('disconnect', () => {
-    const idx = players.findIndex(p => p && p.id === socket.id);
-    if (idx !== -1) players[idx] = null;
-    io.emit('players_update', players);
-    // Si moins de 2 joueurs, reset le compte à rebours et la partie
-    if (players.filter(Boolean).length < 2) {
-      resetGame();
-      io.emit('countdown', null);
-    }
-  });
-
-  socket.on('start_countdown', () => {
-    console.log('⏰ Start countdown requested by player:', socket.id);
-    startCountdown();
-  });
-
-  socket.on('reset_game', () => {
-    console.log('🔄 Reset game requested by player:', socket.id);
-    resetGame();
-  });
+  // TODO : Adapter tous les autres événements (place_building, etc.) pour fonctionner par session
+  // ...
 });
 
 app.get('/', (req, res) => {
