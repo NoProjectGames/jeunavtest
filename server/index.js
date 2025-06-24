@@ -210,7 +210,7 @@ function resetGame() {
   }
   countdownValue = 0;
   
-  // Réinitialiser toutes les variables
+  // Réinitialiser toutes les variables sauf les pseudos
   buildings = [];
   missiles = [];
   drones = [];
@@ -218,6 +218,7 @@ function resetGame() {
   gameStarted = false;
   missileIdCounter = 0;
   droneIdCounter = 0;
+  // Ne pas toucher à players ici pour conserver les pseudos
   
   // Envoyer la réinitialisation à tous les joueurs
   io.emit('game_reset', {
@@ -652,7 +653,7 @@ io.on('connection', (socket) => {
   }
 
   // Place le joueur dans le slot
-  players[freeIndex] = { id: socket.id };
+  players[freeIndex] = { id: socket.id, pseudo: null };
   socket.emit('your_index', freeIndex);
   io.emit('players_update', players);
   
@@ -664,6 +665,19 @@ io.on('connection', (socket) => {
   
   // Envoyer la vie actuelle au nouveau joueur
   socket.emit('health_update', playerHealth);
+
+  // Nouveau : gestion du pseudo
+  socket.on('set_pseudo', ({ pseudo, index }) => {
+    console.log('set_pseudo reçu:', pseudo, 'pour index:', index);
+    if (typeof index === 'number' && players[index] && players[index].id === socket.id) {
+      console.log('Avant maj:', JSON.stringify(players[index]));
+      players[index].pseudo = pseudo;
+      console.log('Après maj:', JSON.stringify(players[index]));
+      io.emit('players_update', players);
+    } else {
+      console.log('set_pseudo ignoré: index ou id non valide', index, players[index] && players[index].id, socket.id);
+    }
+  });
 
   // Démarrage du compte à rebours si 2 joueurs ou plus
   if (players.filter(Boolean).length >= 2 && !gameStarted) {
