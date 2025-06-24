@@ -818,19 +818,27 @@ function App() {
               <div
                 style={{
                   position: 'fixed',
-                  left: buildMenu.x,
-                  top: buildMenu.y,
+                  left: '50%',
+                  top: '50%',
+                  transform: 'translate(-50%, -50%)',
                   background: '#fff',
-                  border: '2px solid #4a90e2',
-                  borderRadius: 10,
-                  boxShadow: '0 4px 16px #0006',
+                  border: '3px solid #4a90e2',
+                  borderRadius: 15,
+                  boxShadow: '0 8px 32px #0008',
                   zIndex: 1000,
-                  padding: 10,
-                  minWidth: 200,
+                  padding: '20px 25px',
+                  minWidth: 350,
+                  maxWidth: 400,
                 }}
                 onClick={e => e.stopPropagation()}
               >
-                <div style={{fontWeight:'bold',marginBottom:8}}>Construire :</div>
+                <div style={{
+                  fontWeight:'bold',
+                  fontSize: 24,
+                  marginBottom: 20,
+                  textAlign: 'center',
+                  color: '#4a90e2'
+                }}>Construire un bâtiment</div>
                 {BUILDINGS.map(b => {
                   const canAfford = resources.gold >= b.cost;
                   return (
@@ -838,27 +846,41 @@ function App() {
                       key={b.name}
                       style={{
                         cursor: canAfford ? 'pointer' : 'not-allowed',
-                        padding: '8px 10px',
-                        borderRadius: 6,
+                        padding: '15px 20px',
+                        borderRadius: 10,
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
-                        gap: 8,
-                        fontSize: 16,
-                        backgroundColor: canAfford ? 'transparent' : '#f0f0f0',
+                        gap: 15,
+                        fontSize: 18,
+                        backgroundColor: canAfford ? 'transparent' : '#f5f5f5',
                         color: canAfford ? '#000' : '#999',
-                        border: canAfford ? 'none' : '1px solid #ddd'
+                        border: canAfford ? '2px solid #e0e0e0' : '2px solid #ddd',
+                        marginBottom: 10,
+                        transition: 'all 0.2s ease',
+                        ...(canAfford && {
+                          ':hover': {
+                            backgroundColor: '#f8f9ff',
+                            borderColor: '#4a90e2',
+                            transform: 'translateY(-2px)',
+                            boxShadow: '0 4px 12px #4a90e222'
+                          }
+                        })
                       }}
                       onClick={() => canAfford && handleBuildingSelect(b)}
                     >
-                      <div style={{display: 'flex', alignItems: 'center', gap: 8}}>
-                        <span>{b.icon}</span>
-                        <span>{b.name}</span>
+                      <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                        <span style={{fontSize: 24}}>{b.icon}</span>
+                        <span style={{fontWeight: '600'}}>{b.name}</span>
                       </div>
                       <div style={{
-                        fontSize: 14,
+                        fontSize: 16,
                         color: canAfford ? (resources.gold >= b.cost ? '#4caf50' : '#ff9800') : '#999',
-                        fontWeight: 'bold'
+                        fontWeight: 'bold',
+                        backgroundColor: canAfford ? '#f0f8ff' : '#f5f5f5',
+                        padding: '8px 12px',
+                        borderRadius: 6,
+                        border: `1px solid ${canAfford ? '#4caf50' : '#ddd'}`
                       }}>
                         {b.cost.toLocaleString()}
                       </div>
@@ -866,7 +888,17 @@ function App() {
                   );
                 })}
                 <div
-                  style={{marginTop:8,textAlign:'right',fontSize:13,cursor:'pointer',color:'#888'}}
+                  style={{
+                    marginTop: 20,
+                    textAlign: 'center',
+                    fontSize: 16,
+                    cursor: 'pointer',
+                    color: '#666',
+                    padding: '10px',
+                    borderRadius: 8,
+                    border: '1px solid #ddd',
+                    transition: 'all 0.2s ease'
+                  }}
                   onClick={handleCloseMenu}
                 >Annuler</div>
               </div>
