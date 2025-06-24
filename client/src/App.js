@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { io } from 'socket.io-client';
 
-const socket = io('https://jeunavtest.onrender.com');
+const socket = io('https://jeunavtest.onrender.com'); //https://jeunavtest.onrender.com //http://localhost:3001
 
 const NB_PLAYERS = 8;
 const BASE_VIEW_RATIO = 0.7;
@@ -69,6 +69,8 @@ function App() {
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [mapOffset, setMapOffset] = useState({ x: 0, y: 0 });
   const svgRef = useRef();
+  const [inLobby, setInLobby] = useState(true);
+  const [pseudo, setPseudo] = useState("");
 
   const windowWidth = window.innerWidth;
   const svgHeight = 700;
@@ -172,6 +174,13 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    // Envoie le pseudo et l'index au serveur
+    if (!inLobby && pseudo.trim() && myIndex !== null) {
+      socket.emit('set_pseudo', { pseudo, index: myIndex });
+    }
+  }, [inLobby, pseudo, myIndex]);
+
   const mySlot = getPlayerIndex(players, myId, myIndex);
   const baseX = mySlot * SEGMENT_WIDTH;
 
@@ -202,6 +211,7 @@ function App() {
   }, [gameStarted, buildings, baseX]);
 
   function handleMapClick(e) {
+    if (isEliminated) return;
     if (!gameStarted) return;
     const rect = svgRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / zoom;
@@ -232,6 +242,7 @@ function App() {
       }));
       
       // Envoyer le bâtiment au serveur
+      if (playerHealth[building.ownerSlot] === 0) return;
       socket.emit('place_building', building);
       
       setPendingBuilding(null);
@@ -300,6 +311,42 @@ function App() {
   // Empêcher le menu contextuel du clic droit
   function handleContextMenu(e) {
     e.preventDefault();
+  }
+
+  // Log pour debug : voir la structure de players à chaque rendu
+  console.log('players for render:', players);
+
+  const isEliminated = mySlot >= 0 && playerHealth[mySlot] === 0;
+
+  if (inLobby) {
+    return (
+      <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#222', color: '#fff'}}>
+        <h1>Bienvenue sur le jeu !</h1>
+        <input
+          type="text"
+          placeholder="Entrez votre pseudo"
+          value={pseudo}
+          onChange={e => setPseudo(e.target.value)}
+          style={{padding: '10px', fontSize: '1.2em', marginBottom: '20px', borderRadius: '5px', border: 'none'}}
+        />
+        <button
+          onClick={() => setInLobby(false)}
+          style={{padding: '10px 30px', fontSize: '1.2em', borderRadius: '5px', border: 'none', background: '#4a90e2', color: '#fff', cursor: 'pointer'}}
+          disabled={!pseudo.trim()}
+        >
+          Jouer
+        </button>
+      </div>
+    );
+  }
+
+  if (isEliminated) {
+    return (
+      <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:'100vh',background:'#222',color:'#fff'}}>
+        <h1>Vous êtes éliminé !</h1>
+        <p>Votre base a été détruite.<br/>Vous ne pouvez plus jouer pour cette partie.</p>
+      </div>
+    );
   }
 
   return (
@@ -429,6 +476,19 @@ function App() {
                         >
                           {`${playerHealth[segIdx]}%`}
                         </text>
+                        {/* Affichage du pseudo sous la vie pour chaque joueur (debug robuste) */}
+                        {player && typeof player.pseudo === 'string' && player.pseudo.trim() !== '' && (
+                          <text
+                            x={x + SEGMENT_WIDTH / 2}
+                            y={svgHeight * 0.89}
+                            textAnchor="middle"
+                            fontSize={14}
+                            fontWeight="bold"
+                            fill={PLAYER_COLORS[segIdx]}
+                          >
+                            {player.pseudo}
+                          </text>
+                        )}
                       </g>
                     </g>
                   );
