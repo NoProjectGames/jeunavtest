@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { io } from 'socket.io-client';
 
-const socket = io('http://localhost:3001'); //https://jeunavtest.onrender.com //http://localhost:3001
+const socket = io('https://jeunavtest.onrender.com'); //https://jeunavtest.onrender.com //http://localhost:3001
 
 const NB_PLAYERS = 8;
 const BUILDINGS = [
