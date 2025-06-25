@@ -770,24 +770,55 @@ io.on('connection', (socket) => {
 
   // Place un bâtiment dans une session
   socket.on('place_building', (data) => {
+    console.log('[DEBUG PLACE_BUILDING] Reçu du client:', data);
     const { sessionId, ...building } = data;
     const session = sessions[sessionId];
-    if (!session || !session.gameStarted) return;
+    if (!session) {
+      console.log('[DEBUG BLOCK] Session introuvable pour', sessionId);
+      return;
+    }
     const slot = building.ownerSlot;
-    if (isOnHealthBar(building.x, building.y, slot)) {
+    if (slot == null || session.players[slot] == null) {
+      console.log('[DEBUG BLOCK] Slot ou joueur invalide:', slot);
+      return;
+    }
+    if (session.players[slot].eliminated || session.playerHealth[slot] === 0) {
+      console.log('[DEBUG BLOCK] Joueur éliminé (slot', slot, ')');
+      return;
+    }
+    // Vérification du coût dynamique
+    const dynamicCost = getDynamicBuildingCost(session, slot, building.name);
+    if (session.players[slot].gold < dynamicCost) {
+      console.log('[DEBUG BLOCK] Pas assez de gold:', session.players[slot].gold, '<', dynamicCost);
       if (socket && socket.emit) {
-        socket.emit('build_error', { message: "Impossible de construire sur la barre de vie !" });
+        socket.emit('build_error', { message: "Pas assez de crypto pour ce bâtiment (prix dynamique)." });
       }
       return;
     }
-    building.id = session.buildingIdCounter++;
-    session.buildings.push(building);
+    // Vérification collision ou zone interdite (exemple générique)
+    // (ajoute ici d'autres validations spécifiques à ton jeu)
+    // ...
+    // Si tout est OK, ajout du bâtiment
+    session.players[slot].gold -= dynamicCost;
+    const buildingToAdd = { ...building };
+    buildingToAdd.cost = dynamicCost;
+    buildingToAdd.id = session.buildingIdCounter++;
+    session.buildings.push(buildingToAdd);
+    console.log('[DEBUG BUILD] Bâtiment ajouté à session.buildings:', buildingToAdd, '| Total:', session.buildings.length);
+    const countAfter = session.buildings.filter(b => b.ownerSlot === slot && b.name === building.name).length;
+    console.log(`[DEBUG BUILD] ${building.name} construit par slot ${slot} | coût: ${dynamicCost} | gold restant: ${session.players[slot].gold} | nb après: ${countAfter} | total buildings: ${session.buildings.length}`);
     io.to(sessionId).emit('buildings_update', session.buildings);
-    if (building.name === 'Lance Missile') {
-      startBarrackTimerForSession(session, building);
+    console.log('[DEBUG BUILDINGS_UPDATE] Envoyé au client:', session.buildings.length, 'bâtiments');
+    io.to(sessionId).emit('players_update', session.players);
+    // Synchronisation explicite du gold pour le joueur
+    if (socket && socket.emit) {
+      socket.emit('resources_update', { gold: session.players[slot].gold });
     }
-    if (building.name === 'Usine de Drones') {
-      startDroneFactoryTimerForSession(session, building);
+    if (buildingToAdd.name === 'Lance Missile') {
+      startBarrackTimerForSession(session, buildingToPlace);
+    }
+    if (buildingToAdd.name === 'Usine de Drones') {
+      startDroneFactoryTimerForSession(session, buildingToPlace);
     }
   });
 
@@ -925,6 +956,36 @@ io.on('connection', (socket) => {
 
   // TODO : Adapter tous les autres événements (place_building, etc.) pour fonctionner par session
   // ...
+
+  // Récupérer l'objet du marché noir courant
+  socket.on('get_black_market', ({ sessionId }, cb) => {
+    const session = sessions[sessionId];
+    if (!session || !session.blackMarket) return cb && cb({ error: 'Session not found' });
+    cb && cb(getCurrentBlackMarketItem(session));
+  });
+
+  // Achat d'un objet du marché noir
+  socket.on('buy_black_market', ({ sessionId, playerIndex }, cb) => {
+    const session = sessions[sessionId];
+    if (!session || !session.blackMarket) return cb && cb({ error: 'Session not found' });
+    const item = getCurrentBlackMarketItem(session);
+    const player = session.players[playerIndex];
+    if (!player || player.gold < item.price) return cb && cb({ error: 'Pas assez de crypto.' });
+    // Déduire le coût
+    player.gold -= item.price;
+    // Appliquer l'effet (exemple pour le nuke)
+    if (item.effect === 'nuke_segment') {
+      // À compléter côté client : demander sur quel segment appliquer
+      // Ici, on ne fait rien (logique à compléter)
+    }
+    if (item.effect === 'heal_base') {
+      session.playerHealth[playerIndex] = 100;
+      io.to(session.sessionId).emit('health_update', session.playerHealth);
+    }
+    // ... autres effets ...
+    cb && cb({ success: true, item });
+    io.to(session.sessionId).emit('players_update', session.players);
+  });
 });
 
 app.get('/', (req, res) => {
@@ -1025,8 +1086,34 @@ function startGameForSession(sessionId) {
 
   // Démarrer la boucle de jeu (missiles, drones, collisions, etc.)
   if (session.loop) clearInterval(session.loop);
+  session._lastResourceTick = Date.now();
   session.loop = setInterval(() => {
     if (!session.gameStarted) return;
+    // --- Production de ressources pour joueurs humains ---
+    const nowResource = Date.now();
+    if (!session._lastResourceTick) session._lastResourceTick = nowResource;
+    if (nowResource - session._lastResourceTick >= 1000) {
+      for (let slot = 0; slot < session.players.length; slot++) {
+        const player = session.players[slot];
+        if (player && !player.isBot && session.playerHealth[slot] > 0) {
+          // Calculer la production
+          const SEGMENT_WIDTH = 1920 / 8;
+          const myBuildings = session.buildings.filter(b => b.ownerSlot === slot);
+          const nbCryptoFarms = myBuildings.filter(b => b.name === 'Crypto Farm').length;
+          const nbServeurs = myBuildings.filter(b => b.name === 'Serveur').length;
+          const goldGain = BASE_GOLD_PER_SEC + nbCryptoFarms * CRYPTO_FARM_BONUS;
+          const datasGain = 20000 + nbServeurs * 10000;
+          player.gold += goldGain;
+          player.datas += datasGain;
+          // Envoi au joueur
+          const sock = Array.from(io.sockets.sockets.values()).find(s => s.id === player.id && s.sessionId === sessionId);
+          if (sock && sock.emit) {
+            sock.emit('resources_update', { gold: player.gold, datas: player.datas });
+          }
+        }
+      }
+      session._lastResourceTick = nowResource;
+    }
     // Déplacer les missiles
     session.missiles.forEach(missile => {
       // Utiliser la vitesse spécifique au type de missile, ou la vitesse par défaut
@@ -1086,6 +1173,13 @@ function startGameForSession(sessionId) {
     drones: session.drones,
     playerHealth: session.playerHealth
   });
+
+  // --- MARCHÉ NOIR ---
+  if (session.blackMarket && session.blackMarket.timer) {
+    clearInterval(session.blackMarket.timer);
+  }
+  initBlackMarketForSession(session);
+  io.to(session.sessionId).emit('black_market_update', getCurrentBlackMarketItem(session));
 } 
 
 // --- NOUVELLES FONCTIONS PAR SESSION ---
@@ -1152,7 +1246,20 @@ function checkMissileCollisionsForSession(session) {
   const segmentWidth = screenWidth / 8;
   for (let i = session.missiles.length - 1; i >= 0; i--) {
     const missile = session.missiles[i];
-    for (let playerSlot = 0; playerSlot < 8; playerSlot++) {
+    // Déterminer la direction du missile
+    const direction = missile.direction || 1;
+    // Trouver le segment actuel du missile
+    let missileSegment = Math.floor(missile.x / segmentWidth);
+    // On va parcourir les segments dans la direction du missile
+    let segmentsToCheck = [];
+    if (direction === 1) {
+      for (let s = missileSegment; s < 8; s++) segmentsToCheck.push(s);
+    } else {
+      for (let s = missileSegment; s >= 0; s--) segmentsToCheck.push(s);
+    }
+    let lastOwner = null;
+    let hit = false;
+    for (const playerSlot of segmentsToCheck) {
       const playerCenterX = playerSlot * segmentWidth + segmentWidth / 2;
       // Déterminer le vrai propriétaire du segment via segmentsByPlayer
       let ownerSlot = playerSlot;
@@ -1164,6 +1271,9 @@ function checkMissileCollisionsForSession(session) {
           }
         }
       }
+      // Si c'est le même owner que le segment précédent, on ignore (le missile traverse)
+      if (lastOwner !== null && ownerSlot === lastOwner) continue;
+      lastOwner = ownerSlot;
       // Ne pas toucher les bases alliées
       if (missile.ownerSlot === ownerSlot) continue;
       if (Math.abs(missile.x - playerCenterX) < 10) {
@@ -1179,9 +1289,11 @@ function checkMissileCollisionsForSession(session) {
         if (prevHealth > 0 && session.playerHealth[ownerSlot] === 0 && session.lastAttacker[playerSlot] !== null && session.lastAttacker[playerSlot] !== ownerSlot) {
           annexSegmentOnElimination(session, playerSlot, session.lastAttacker[playerSlot]);
         }
+        hit = true;
         break;
       }
     }
+    if (hit) continue;
   }
 }
 // --- Ajout : gestion des usines de drones par session ---
@@ -1400,24 +1512,43 @@ function checkDroneCollisionsForSession(session) {
 // Ajout : gestion des segments possédés par chaque joueur (par session)
 function annexSegmentOnElimination(session, eliminatedSlot, killerSlot) {
   if (!session.segmentsByPlayer) session.segmentsByPlayer = new Map();
-  // Ajouter le segment éliminé à la liste du vainqueur
+  // Récupérer récursivement tous les segments annexés par la victime, même indirectement
+  let allSegments = new Set();
+  function collectAnnexedSegments(slot) {
+    // Trouver tous les segments dont le ownerSlot est 'slot'
+    for (const [owner, segs] of session.segmentsByPlayer.entries()) {
+      if (parseInt(owner) === slot) {
+        for (const seg of segs) {
+          if (!allSegments.has(seg)) {
+            allSegments.add(seg);
+            collectAnnexedSegments(seg);
+          }
+        }
+      }
+    }
+  }
+  allSegments.add(eliminatedSlot);
+  collectAnnexedSegments(eliminatedSlot);
+  // Ajouter tous les segments à la liste du vainqueur
   if (!session.segmentsByPlayer.has(killerSlot)) session.segmentsByPlayer.set(killerSlot, new Set([killerSlot]));
-  session.segmentsByPlayer.get(killerSlot).add(eliminatedSlot);
-  // Transférer tous les bâtiments du segment
+  for (const seg of allSegments) {
+    session.segmentsByPlayer.get(killerSlot).add(seg);
+  }
+  // Transférer tous les bâtiments des segments annexés
   const screenWidth = 1920;
   const segmentWidth = screenWidth / 8;
-  const segStart = eliminatedSlot * segmentWidth;
-  const segEnd = segStart + segmentWidth;
-  session.buildings.forEach(b => {
-    if (b.x >= segStart && b.x < segEnd) {
-      b.ownerSlot = killerSlot;
-    }
-  });
+  for (const seg of allSegments) {
+    const segStart = seg * segmentWidth;
+    const segEnd = segStart + segmentWidth;
+    session.buildings.forEach(b => {
+      if (b.x >= segStart && b.x < segEnd) {
+        b.ownerSlot = killerSlot;
+      }
+    });
+  }
   // Mettre à jour le pseudo du segment (affiché côté client)
-  // (Le client affichera le pseudo du killerSlot pour ce segment)
-  // Fusionner la vie : tous les segments du vainqueur affichent la vie de killerSlot
+  // Synchroniser la vie : tous les segments du vainqueur affichent la vie de killerSlot
   // (Côté client, il faudra afficher playerHealth[killerSlot] pour tous les segments du vainqueur)
-  // Envoyer les updates
   io.to(session.sessionId || session.id).emit('buildings_update', session.buildings);
   io.to(session.sessionId || session.id).emit('segments_update', Array.from(session.segmentsByPlayer.entries()).map(([slot, segs]) => ({ownerSlot: slot, segments: Array.from(segs)})));
 }
@@ -1556,32 +1687,137 @@ function decideBotBuilding(sessionId, slot) {
   const botBuildings = session.buildings.filter(b => b.ownerSlot === slot);
   if (botBuildings.length >= 8) return null;
 
-  // --- PRIORITÉ 1 : Premier Lance Missile très tôt ---
+  // --- Priorité absolue : Crypto Farm en tout premier ---
+  if (!botBuildings.some(b => b.name === 'Crypto Farm') && bot.gold >= 25000) {
+    return { name: 'Crypto Farm', icon: '💻', cost: 25000, priority: 1 };
+  }
+  // --- Ensuite : Lance Missile dès que possible ---
+  if (!botBuildings.some(b => b.name === 'Lance Missile') && bot.gold >= 50000) {
+    return { name: 'Lance Missile', icon: '🚀', cost: 50000, priority: 2 };
+  }
+  // --- Ne jamais construire de Serveur tant qu'il n'y a pas de Lance Missile ---
+  if (!botBuildings.some(b => b.name === 'Lance Missile')) {
+    return null;
+  }
+  // --- Stratégie avancée : offensive prioritaire si pas assez de Lance Missiles ou Usine de Drones ---
   const nbLanceMissiles = botBuildings.filter(b => b.name === 'Lance Missile').length;
-  if (bot.gold >= 30000 && nbLanceMissiles === 0) {
-    return { name: 'Lance Missile', icon: '🚀', cost: 50000, priority: 1, force: true };
+  const nbUsines = botBuildings.filter(b => b.name === 'Usine de Drones').length;
+  if (nbLanceMissiles < 2 && bot.gold >= 50000) {
+    return { name: 'Lance Missile', icon: '🚀', cost: 50000, priority: 1 };
+  }
+  if (nbUsines < 1 && bot.gold >= 55000) {
+    return { name: 'Usine de Drones', icon: '🤖', cost: 55000, priority: 2 };
+  }
+  // --- Production si ressources faibles ---
+  if (bot.gold < 40000 && !botBuildings.some(b => b.name === 'Serveur') && bot.gold >= 75000) {
+    return { name: 'Serveur', icon: '🖥️', cost: 75000, priority: 2 };
+  }
+  // ... puis stratégie avancée ...
+
+  // --- 1. Adaptation à la menace ---
+  const isUnderThreat = session.playerHealth[slot] < 50 || (session._lastBotHealth && session.playerHealth[slot] < session._lastBotHealth[slot]);
+  session._lastBotHealth = session._lastBotHealth || Array(8).fill(100);
+  session._lastBotHealth[slot] = session.playerHealth[slot];
+
+  // --- 2. Défense des bases annexées ---
+  let annexedSegments = [];
+  if (session.segmentsByPlayer && session.segmentsByPlayer.has(slot)) {
+    annexedSegments = Array.from(session.segmentsByPlayer.get(slot)).filter(s => s !== slot);
   }
 
-  // --- PRIORITÉ 2 : Antimissile en face des Lance Missiles ennemis ---
-  // Chercher les Lance Missiles ennemis qui "visent" ce segment (dans la moitié du segment la plus proche de la frontière)
-  const enemyBarracks = session.buildings.filter(b => b.name === 'Lance Missile' && b.ownerSlot !== slot);
-  for (const barrack of enemyBarracks) {
-    // Si la caserne est proche de la frontière avec ce segment (moins de 60px du bord du segment du bot)
-    if (barrack.x >= segmentStart - 60 && barrack.x <= segmentEnd + 60) {
-      // Vérifier s'il y a déjà un Antimissile du bot à moins de 80px de cette position
-      const hasAnti = botBuildings.some(b => b.name === 'Antimissile' && Math.abs(b.x - barrack.x) < 80);
+  // --- 3. Offensive si en avance ---
+  const nbBases = (session.segmentsByPlayer && session.segmentsByPlayer.has(slot)) ? session.segmentsByPlayer.get(slot).size : 1;
+  const isAggressive = nbBases > 2 || bot.gold > 120000;
+
+  // --- 4. Ciblage intelligent ---
+  let weakestEnemySlot = null;
+  let minHealth = 101;
+  for (let i = 0; i < 8; i++) {
+    if (i !== slot && session.playerHealth[i] > 0 && session.playerHealth[i] < minHealth) {
+      minHealth = session.playerHealth[i];
+      weakestEnemySlot = i;
+    }
+  }
+
+  // --- 5. Répartition spatiale ---
+  function isTooCloseToSameType(x, y, type) {
+    return botBuildings.some(b => b.name === type && Math.abs(b.x - x) < 40 && Math.abs(b.y - y) < 40);
+  }
+
+  // --- 6. Après capture, défendre la base prise ---
+  if (annexedSegments.length > 0) {
+    for (const seg of annexedSegments) {
+      const hasAnti = session.buildings.some(b => b.ownerSlot === slot && Math.abs(b.x - (seg * SEGMENT_WIDTH + SEGMENT_WIDTH/2)) < 60 && b.name === 'Antimissile');
+      const hasChateau = session.buildings.some(b => b.ownerSlot === slot && Math.abs(b.x - (seg * SEGMENT_WIDTH + SEGMENT_WIDTH/2)) < 60 && b.name === 'Château');
       if (!hasAnti && bot.gold >= 20000) {
-        // Placer un Antimissile en face
-        return { name: 'Antimissile', icon: '🛡️', cost: 20000, priority: 0, force: true, xTarget: barrack.x };
+        return { name: 'Antimissile', icon: '🛡️', cost: 20000, priority: 0, force: true, xTarget: seg * SEGMENT_WIDTH + SEGMENT_WIDTH/2 };
+      }
+      if (!hasChateau && bot.gold >= 35000) {
+        return { name: 'Château', icon: '🏛️', cost: 35000, priority: 0, force: true };
       }
     }
   }
 
-  // --- Logique existante ---
-  // Logique spéciale : si le bot a beaucoup de ressources, priorité aux Lance Missiles
-  if (bot.gold >= 50000 && nbLanceMissiles < 3) {
-    return { name: 'Lance Missile', icon: '🚀', cost: 50000, priority: 1 };
+  // --- 7. Utilisation du bombardement aérien ---
+  if (isAggressive && bot.gold >= 150000) {
+    // Cibler la base ennemie la plus faible ou un cluster de bâtiments
+    let targetSlot = weakestEnemySlot;
+    if (targetSlot !== null) {
+      const enemyBuildings = session.buildings.filter(b => b.ownerSlot === targetSlot);
+      if (enemyBuildings.length >= 2) {
+        // Déclencher un bombardement sur le centre de la base
+        const avgX = enemyBuildings.reduce((sum, b) => sum + b.x, 0) / enemyBuildings.length;
+        const avgY = enemyBuildings.reduce((sum, b) => sum + b.y, 0) / enemyBuildings.length;
+        // Simuler l'appel (dans la vraie logique, il faudrait socket.emit côté bot, ici on peut juste placer un marqueur ou log)
+        if (!session._lastBotAirStrike || Date.now() - session._lastBotAirStrike > 20000) {
+          session._lastBotAirStrike = Date.now();
+          // On simule l'appel d'un air_strike (à implémenter côté bot si besoin)
+          console.log(`[BOT ${bot.pseudo}] Bombardement aérien sur base P${targetSlot+1} (${Math.round(avgX)},${Math.round(avgY)})`);
+          // On pourrait appeler ici une fonction airStrikeBot(session, avgX, avgY);
+        }
+      }
+    }
   }
+
+  // --- Défense prioritaire si sous menace ---
+  if (isUnderThreat) {
+    if (bot.gold >= 20000 && !botBuildings.some(b => b.name === 'Antimissile')) {
+      return { name: 'Antimissile', icon: '🛡️', cost: 20000, priority: 0 };
+    }
+    if (bot.gold >= 35000 && !botBuildings.some(b => b.name === 'Château')) {
+      return { name: 'Château', icon: '🏛️', cost: 35000, priority: 0 };
+    }
+    if (bot.gold >= 100000 && !botBuildings.some(b => b.name === 'Centre Médical')) {
+      return { name: 'Centre Médical', icon: '🏥', cost: 100000, priority: 0 };
+    }
+  }
+
+  // --- Offensive si en avance ---
+  if (isAggressive) {
+    if (bot.gold >= 50000 && botBuildings.filter(b => b.name === 'Lance Missile').length < 3) {
+      // Répartition spatiale
+      let tryX, tryY, attempts = 0;
+      do {
+        tryX = segmentStart + 40 + Math.random() * (SEGMENT_WIDTH - 80);
+        tryY = 140 + Math.random() * 420;
+        attempts++;
+      } while (isTooCloseToSameType(tryX, tryY, 'Lance Missile') && attempts < 10);
+      return { name: 'Lance Missile', icon: '🚀', cost: 50000, priority: 1 };
+    }
+    if (bot.gold >= 55000 && !botBuildings.some(b => b.name === 'Usine de Drones')) {
+      return { name: 'Usine de Drones', icon: '🤖', cost: 55000, priority: 2 };
+    }
+  }
+
+  // --- Production si ressources faibles ---
+  if (bot.gold < 40000 && !botBuildings.some(b => b.name === 'Crypto Farm')) {
+    return { name: 'Crypto Farm', icon: '💻', cost: 25000, priority: 1 };
+  }
+  if (bot.gold < 40000 && !botBuildings.some(b => b.name === 'Serveur')) {
+    return { name: 'Serveur', icon: '🖥️', cost: 75000, priority: 2 };
+  }
+
+  // --- Logique existante fallback ---
   const sortedBuildings = [...BOT_BUILDINGS].sort((a, b) => a.priority - b.priority);
   for (const building of sortedBuildings) {
     if (bot.gold >= building.cost) {
@@ -1592,7 +1828,7 @@ function decideBotBuilding(sessionId, slot) {
         if (nbAntimissiles >= 2) continue;
       }
       if (building.name === 'Lance Missile') {
-        if (nbLanceMissiles >= 3) continue;
+        if (botBuildings.filter(b => b.name === 'Lance Missile').length >= 3) continue;
       }
       if (!hasBuilding || canHaveMultiple) {
         return building;
@@ -1734,3 +1970,64 @@ function isOnHealthBar(x, y, slot) {
     y <= 560
   );
 } 
+
+// --- MARCHÉ NOIR ---
+const BLACK_MARKET_ITEMS = [
+  {
+    id: 'nuke',
+    name: 'Missile nucléaire',
+    description: "Détruit tous les bâtiments d'un segment adverse.",
+    price: 200000,
+    icon: '☢️',
+    effect: 'nuke_segment',
+  },
+  {
+    id: 'heal',
+    name: 'Sérum de Résurrection',
+    description: "Rend toute la vie à votre base principale.",
+    price: 120000,
+    icon: '💉',
+    effect: 'heal_base',
+  },
+  {
+    id: 'spy',
+    name: 'Espionnage',
+    description: "Révèle tous les bâtiments adverses pendant 30s.",
+    price: 80000,
+    icon: '🕵️',
+    effect: 'reveal',
+  },
+  // Ajoutez d'autres objets ici
+];
+
+// Pour chaque session, on stocke l'index courant et le timer de rotation
+function initBlackMarketForSession(session) {
+  session.blackMarket = {
+    currentIndex: 0,
+    timer: null,
+  };
+  session.blackMarket.timer = setInterval(() => {
+    session.blackMarket.currentIndex = (session.blackMarket.currentIndex + 1) % BLACK_MARKET_ITEMS.length;
+    io.to(session.sessionId).emit('black_market_update', getCurrentBlackMarketItem(session));
+  }, 2 * 60 * 1000); // 2 minutes
+}
+
+function getCurrentBlackMarketItem(session) {
+  return BLACK_MARKET_ITEMS[session.blackMarket.currentIndex];
+}
+
+function stopBlackMarketForSession(session) {
+  if (session.blackMarket && session.blackMarket.timer) {
+    clearInterval(session.blackMarket.timer);
+    session.blackMarket.timer = null;
+  }
+}
+
+// Ajout : fonction pour calculer le coût dynamique d'un bâtiment (corrigé)
+function getDynamicBuildingCost(session, ownerSlot, buildingName) {
+  // Compte le nombre de bâtiments de ce type déjà construits par ce joueur (ne pas inclure le bâtiment en cours de construction)
+  const count = session.buildings.filter(b => b.ownerSlot === ownerSlot && b.name === buildingName).length;
+  // Trouve le coût de base
+  const base = (BOT_BUILDINGS.find(b => b.name === buildingName) || {}).cost || 0;
+  return base * Math.pow(2, count);
+}
