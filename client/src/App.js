@@ -12,8 +12,10 @@ const BUILDINGS = [
   { name: 'Antimissile', icon: '🛡️', cost: 20000 },
   { name: 'Usine de Drones', icon: '🤖', cost: 55000 },
   { name: 'Centre Médical', icon: '🏥', cost: 100000 },
+  { name: 'Bombardement aérien', icon: '🛩️', cost: 150000 },
+  { name: 'Serveur', icon: '🖥️', cost: 75000 },
 ];
-const INITIAL_RESOURCES = { gold: 30000, datas: 100000, population: 10, populationMax: 20, cryptoPerSec: 1000 };
+const INITIAL_RESOURCES = { gold: 30000, datas: 100000, population: 10, populationMax: 20, cryptoPerSec: 1000, datasPerSec: 20000 };
 const BASE_GOLD_PER_SEC = 1000;
 const CRYPTO_FARM_BONUS = 5000;
 const BASE_POP_PER_SEC = 0.1;
@@ -49,10 +51,6 @@ const MISSILE_TYPES = [
 // pour garantir la cohérence entre clients et serveur, peu importe la taille d'écran.
 const MAP_WIDTH = 1920;
 
-function getPlayerIndex(players, myId, myIndex) {
-  if (myIndex !== null && myIndex !== undefined) return myIndex;
-  return players.findIndex(p => p && p.id === myId);
-}
 function clamp(val, min, max) {
   return Math.max(min, Math.min(max, val));
 }
@@ -71,6 +69,7 @@ function App() {
   const [gameStarted, setGameStarted] = useState(false);
   const [myId, setMyId] = useState(null);
   const [myIndex, setMyIndex] = useState(null);
+  const [mySlot, setMySlot] = useState(null);
   const [buildMenu, setBuildMenu] = useState(null);
   const [buildings, setBuildings] = useState([]);
   const [resources, setResources] = useState(INITIAL_RESOURCES);
@@ -93,13 +92,27 @@ function App() {
   const [joining, setJoining] = useState(false); // Pour désactiver les boutons pendant la connexion
   const [segmentsByPlayer, setSegmentsByPlayer] = useState({});
   const [forceUpdate, setForceUpdate] = useState(0);
-  const [missileMenu, setMissileMenu] = useState(null); // {x, y, buildingId}
+  const [missileMenu, setMissileMenu] = useState(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [lastMissileType, setLastMissileType] = useState(null); // Pour mémoriser le dernier type sélectionné
+  const [pendingAirStrike, setPendingAirStrike] = useState(false);
+  const [airStrikeAnimation, setAirStrikeAnimation] = useState(false);
+  const [airStrikeData, setAirStrikeData] = useState(null);
+  const [explosionAnimation, setExplosionAnimation] = useState(false);
 
   const svgHeight = 700;
   const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
   const totalWidth = MAP_WIDTH;
+
+  const baseX = mySlot * SEGMENT_WIDTH;
+
+  // Correction : initialisation locale de segmentsByPlayer si vide
+  const effectiveSegmentsByPlayer = Object.keys(segmentsByPlayer).length > 0
+    ? segmentsByPlayer
+    : (mySlot !== null && mySlot >= 0 ? { [mySlot]: mySlot } : {});
+
+  // Calcul de effectiveMySlot en dehors du useEffect
+  const effectiveMySlot = mySlot;
 
   useEffect(() => {
     console.log('Connecting to server...');
@@ -107,14 +120,23 @@ function App() {
     
     socket.on('connect', () => {
       console.log('Connected to server, socket ID:', socket.id);
+      console.log('🔍 Socket info - sessionId:', socket.sessionId, 'playerIndex:', socket.playerIndex);
+      
+      // Test de connexion : envoyer un événement de test
+      socket.emit('test_connection', { message: 'Test from client' });
     });
     
     socket.on('disconnect', () => {
       console.log('Disconnected from server');
     });
     
+    // Test de réponse du serveur
+    socket.on('test_response', (data) => {
+      console.log('✅ Test response reçu du serveur:', data);
+    });
+    
     socket.on('players_update', (players) => {
-      console.log('Players update received:', JSON.stringify(players, null, 2));
+      console.log('👥 players_update reçu:', JSON.stringify(players, null, 2));
       setPlayers(players);
     });
     
@@ -152,13 +174,15 @@ function App() {
     });
     
     socket.on('your_index', (index) => {
-      console.log('Received my index:', index);
+      console.log('📥 Received my index:', index);
       setMyIndex(index);
+      setMySlot(index);
     });
     
     // Réception des mises à jour des bâtiments
     socket.on('buildings_update', (buildings) => {
-      console.log('Buildings update received:', buildings.map(b => ({id: b.id, name: b.name, x: b.x, y: b.y})));
+      console.log('🏗️ buildings_update reçu:', buildings.length, 'bâtiments');
+      console.log('🏗️ Détails des bâtiments:', buildings.map(b => ({id: b.id, name: b.name, x: b.x, y: b.y, ownerSlot: b.ownerSlot})));
       setBuildings(buildings);
     });
     
@@ -201,10 +225,23 @@ function App() {
     });
     
     socket.on('resources_update', (data) => {
+      console.log('📊 resources_update reçu:', data);
+      console.log('🔍 Debug - mySlot:', mySlot, 'myIndex:', myIndex, 'socket.id:', socket.id);
+      
+      // Solution de secours : si mySlot n'est pas défini mais qu'on reçoit des resources_update,
+      // on peut déduire qu'on est le joueur qui reçoit ces mises à jour
+      if (mySlot === null && socket.playerIndex !== undefined) {
+        console.log('🆘 Solution de secours : définition de mySlot basé sur socket.playerIndex:', socket.playerIndex);
+        setMySlot(socket.playerIndex);
+        setMyIndex(socket.playerIndex);
+      }
+      
       if (typeof data.gold === 'number') {
+        console.log('💰 Mise à jour gold:', data.gold);
         setResources(prev => ({ ...prev, gold: data.gold }));
       }
       if (typeof data.datas === 'number') {
+        console.log('💾 Mise à jour datas:', data.datas);
         setResources(prev => ({ ...prev, datas: data.datas }));
       }
     });
@@ -235,28 +272,32 @@ function App() {
     }
   }, [inLobby, pseudo, myIndex]);
 
-  const mySlot = getPlayerIndex(players, myId, myIndex);
-  const baseX = mySlot * SEGMENT_WIDTH;
-
-  // Correction : initialisation locale de segmentsByPlayer si vide
-  const effectiveSegmentsByPlayer = Object.keys(segmentsByPlayer).length > 0
-    ? segmentsByPlayer
-    : (mySlot !== null && mySlot >= 0 ? { [mySlot]: mySlot } : {});
-  console.log('[DEBUG] effectiveSegmentsByPlayer:', JSON.stringify(effectiveSegmentsByPlayer));
-
   // Gain d'or (crypto) et de population chaque seconde
   useEffect(() => {
-    console.log('[PROD] useEffect called, gameStarted:', gameStarted);
-    if (!gameStarted) return;
+    console.log('[PROD] useEffect called, gameStarted:', gameStarted, 'buildings.length:', buildings.length);
+    if (!gameStarted) {
+      console.log('[PROD] Game not started, returning');
+      return;
+    }
+    
+    // Si effectiveMySlot est null, on ne peut pas calculer la production
+    if (effectiveMySlot === null) {
+      console.log('[PROD] effectiveMySlot is null, cannot calculate production');
+      return;
+    }
+    
+    console.log('[PROD] Game started, setting up production interval');
+    
+    // Solution de secours encore plus agressive : si mySlot est null, on utilise 0 par défaut
+    // car d'après les logs serveur, le client a toujours playerIndex: 0
+    console.log('[PROD] effectiveMySlot utilisé:', effectiveMySlot, '(mySlot:', mySlot, ', socket.playerIndex:', socket.playerIndex, ')');
+    
     const interval = setInterval(() => {
       console.log('[PROD] setResources called');
       // Utilise directement les states
-      const effectiveSegmentsByPlayer = Object.keys(segmentsByPlayer).length > 0
-        ? segmentsByPlayer
-        : (mySlot !== null && mySlot >= 0 ? { [mySlot]: mySlot } : {});
       const SEGMENT_WIDTH_LOCAL = MAP_WIDTH / NB_PLAYERS;
       const mySegments = Object.entries(effectiveSegmentsByPlayer)
-        .filter(([segIdx, owner]) => owner === mySlot)
+        .filter(([segIdx, owner]) => owner === effectiveMySlot)
         .map(([segIdx]) => parseInt(segIdx));
       const myBuildings = buildings.filter(b => {
         const segIdx = Math.floor(b.x / SEGMENT_WIDTH_LOCAL);
@@ -264,10 +305,16 @@ function App() {
       });
       const nbCryptoFarms = myBuildings.filter(b => b.name === 'Crypto Farm').length;
       const nbChateaux = myBuildings.filter(b => b.name === 'Château').length;
+      const nbServeurs = myBuildings.filter(b => b.name === 'Serveur').length;
       const goldGain = BASE_GOLD_PER_SEC + nbCryptoFarms * CRYPTO_FARM_BONUS;
-      console.log('[PROD][DEBUG] mySlot:', mySlot, '| effectiveSegmentsByPlayer:', JSON.stringify(effectiveSegmentsByPlayer));
+      const datasGain = 20000 + nbServeurs * 10000; // 20k base + 10k par Serveur
+      
+      console.log('[PROD][DEBUG] effectiveMySlot:', effectiveMySlot, 'mySlot:', mySlot);
+      console.log('[PROD][DEBUG] Tous les bâtiments:', buildings.map(b => `${b.name} (P${b.ownerSlot})`));
+      console.log('[PROD][DEBUG] Mes bâtiments:', myBuildings.map(b => `${b.name} (P${b.ownerSlot})`));
+      console.log('[PROD][DEBUG] nbCryptoFarms:', nbCryptoFarms, 'nbServeurs:', nbServeurs, 'datasGain:', datasGain);
       console.log('[PROD][DEBUG] buildings:', JSON.stringify(buildings));
-      console.log('[PROD][DEBUG] mySegments:', mySegments, '| myBuildings:', myBuildings, '| nbCryptoFarms:', nbCryptoFarms, '| goldGain:', goldGain);
+      console.log('[PROD][DEBUG] mySegments:', mySegments, '| myBuildings:', myBuildings, '| nbCryptoFarms:', nbCryptoFarms, '| nbServeurs:', nbServeurs, '| goldGain:', goldGain, '| datasGain:', datasGain);
       setResources(prev => {
         let newPop = prev.population;
         if (prev.population < prev.populationMax) {
@@ -275,19 +322,24 @@ function App() {
         }
         const newPopMax = INITIAL_RESOURCES.populationMax + nbChateaux * CHATEAU_POP_BONUS;
         const newGold = prev.gold + goldGain;
-        console.log('[PROD] gold:', newGold, 'crypto/s:', goldGain);
+        const newDatas = prev.datas + datasGain;
+        
+        console.log('[PROD] gold:', newGold, 'crypto/s:', goldGain, '| datas:', newDatas, 'datas/s:', datasGain);
         return {
           ...prev,
           gold: newGold,
+          datas: newDatas,
           population: newPop,
           populationMax: newPopMax,
           cryptoPerSec: goldGain, // Stocker la production par seconde
+          datasPerSec: datasGain, // Stocker la production de datas par seconde
         };
       });
       setForceUpdate(f => f + 1); // Force un re-render
     }, 1000);
+
     return () => clearInterval(interval);
-  }, [gameStarted, buildings, segmentsByPlayer, mySlot]);
+  }, [gameStarted, buildings, effectiveMySlot, socket.playerIndex]);
 
   // Quand on rejoint une session, reset les états du jeu
   useEffect(() => {
@@ -302,6 +354,7 @@ function App() {
 
   // Ajoute un handler pour le clic sur un Lance Missile
   function handleLanceMissileClick(e, building) {
+    console.log('[MISSILE] handleLanceMissileClick called for building:', building.id);
     e.stopPropagation();
     // Vérifie si le joueur a assez de crypto pour le missile le moins cher
     const minCost = Math.min(...MISSILE_TYPES.map(m => m.cost));
@@ -310,18 +363,24 @@ function App() {
       setTimeout(() => setErrorMsg(""), 2000);
       return;
     }
+    console.log('[MISSILE] Opening missile menu at:', e.clientX, e.clientY);
     setMissileMenu({ x: e.clientX, y: e.clientY, buildingId: building.id });
   }
 
   // Nouvelle fonction pour tirer un missile immédiatement
   function fireMissile(buildingId, missileType) {
+    console.log('[FIRE] fireMissile called:', buildingId, missileType);
     const missileDef = MISSILE_TYPES.find(m => m.type === missileType);
-    if (!missileDef) return;
+    if (!missileDef) {
+      console.log('[FIRE] Missile type not found:', missileType);
+      return;
+    }
     if (resources.gold < missileDef.cost) {
       setErrorMsg("Pas assez de crypto pour ce missile.");
       setTimeout(() => setErrorMsg(""), 2000);
       return;
     }
+    console.log('[FIRE] Firing missile, cost:', missileDef.cost);
     setResources(prev => ({ ...prev, gold: prev.gold - missileDef.cost }));
     socket.emit('launch_missile', {
       fromBuildingId: buildingId,
@@ -329,11 +388,121 @@ function App() {
       sessionId
     });
     setLastMissileType(missileDef.type);
+    console.log('[FIRE] Missile fired successfully');
   }
 
   function handleMapClickForBuild(e) {
-    if (isEliminated) return;
-    if (!gameStarted) return;
+    console.log('[CLICK] handleMapClickForBuild called, missileMenu:', missileMenu, 'buildMenu:', buildMenu);
+    
+    // Fermer le menu des missiles si ouvert
+    if (missileMenu) {
+      console.log('[CLICK] Closing missile menu');
+      setMissileMenu(null);
+      return;
+    }
+    
+    // Calculer isEliminated localement
+    const isEliminated = mySlot >= 0 && playerHealth[mySlot] === 0;
+    
+    if (isEliminated) {
+      console.log('[CLICK] Player is eliminated, returning');
+      return;
+    }
+    if (!gameStarted) {
+      console.log('[CLICK] Game not started, returning');
+      return;
+    }
+    
+    // Gestion du bombardement aérien
+    if (pendingAirStrike) {
+      // Utilisation de getScreenCTM pour une conversion fiable
+      const svg = svgRef.current;
+      let x, y;
+      if (svg && typeof svg.createSVGPoint === 'function') {
+        const pt = svg.createSVGPoint();
+        pt.x = e.clientX;
+        pt.y = e.clientY;
+        const ctm = svg.getScreenCTM();
+        if (ctm) {
+          const svgP = pt.matrixTransform(ctm.inverse());
+          x = svgP.x;
+          y = svgP.y;
+        } else {
+          // Fallback si getScreenCTM échoue
+          const rect = svg.getBoundingClientRect();
+          x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
+          y = ((e.clientY - rect.top) / rect.height) * svgHeight;
+        }
+      } else {
+        // Fallback pour les navigateurs plus anciens
+        const rect = svg.getBoundingClientRect();
+        x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
+        y = ((e.clientY - rect.top) / rect.height) * svgHeight;
+      }
+      
+      // Déduire le coût du bombardement
+      const airStrikeCost = 150000;
+      setResources(prev => ({
+        ...prev,
+        gold: prev.gold - airStrikeCost
+      }));
+      
+      // Démarrer l'animation du bombardement
+      const startX = (mySlot * SEGMENT_WIDTH) + (SEGMENT_WIDTH / 2); // Centre du segment du joueur
+      const startY = svgHeight * 0.5; // Milieu de la hauteur
+      
+      setAirStrikeData({
+        startX: startX,
+        startY: startY,
+        targetX: x,
+        targetY: y,
+        progress: 0
+      });
+      setAirStrikeAnimation(true);
+      setPendingAirStrike(false);
+      
+      // Animation de 2 secondes
+      const animationDuration = 2000; // 2 secondes
+      const startTime = Date.now();
+      
+      const animate = () => {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / animationDuration, 1);
+        
+        setAirStrikeData(prev => ({
+          ...prev,
+          progress: progress
+        }));
+        
+        if (progress < 1) {
+          requestAnimationFrame(animate);
+        } else {
+          // Animation terminée, déclencher l'explosion
+          setAirStrikeAnimation(false);
+          setExplosionAnimation(true);
+          
+          // Envoyer le bombardement au serveur
+          socket.emit('air_strike', { 
+            x: x, 
+            y: y, 
+            sessionId 
+          });
+          
+          setErrorMsg("Bombardement aérien lancé !");
+          setTimeout(() => setErrorMsg(""), 2000);
+          
+          // Arrêter l'animation d'explosion après 1 seconde
+          setTimeout(() => {
+            setExplosionAnimation(false);
+            setAirStrikeData(null);
+          }, 1000);
+        }
+      };
+      
+      requestAnimationFrame(animate);
+      return;
+    }
+    
     // Utilisation de getScreenCTM pour une conversion fiable
     const svg = svgRef.current;
     let x, y;
@@ -347,17 +516,27 @@ function App() {
         x = svgP.x;
         y = svgP.y;
       } else {
-        // Fallback si getScreenCTM échoue
         const rect = svg.getBoundingClientRect();
         x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
         y = ((e.clientY - rect.top) / rect.height) * svgHeight;
       }
     } else {
-      // Fallback si createSVGPoint n'est pas disponible
-      const rect = svgRef.current.getBoundingClientRect();
+      const rect = svg.getBoundingClientRect();
       x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
       y = ((e.clientY - rect.top) / rect.height) * svgHeight;
     }
+    // Vérifier si le clic est sur la barre de vie
+    const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
+    const segmentStart = mySlot * SEGMENT_WIDTH;
+    const segmentCenter = segmentStart + SEGMENT_WIDTH / 2;
+    if (x >= segmentCenter - 8 && x <= segmentCenter + 8 && y >= 140 && y <= 560) {
+      setErrorMsg("Impossible de construire sur la barre de vie !");
+      setTimeout(() => setErrorMsg(""), 2000);
+      return;
+    }
+    
+    // Sauvegarder les coordonnées du clic
+    setLastClick({ x, y, error: false });
     
     // Vérifier que le clic est dans la zone de construction (zone grise)
     const mapTop = svgHeight * 0.2;
@@ -371,9 +550,8 @@ function App() {
       return;
     }
     
-    // Ouvrir le menu de construction à la position du clic
+    // Ouvrir le menu de construction
     setBuildMenu({ x: e.clientX, y: e.clientY });
-    setLastClick({ x: Math.round(x), y: Math.round(y), error: false });
   }
 
   function handleBuildingSelect(building) {
@@ -383,6 +561,22 @@ function App() {
     if (resources.gold < building.cost) {
       setErrorMsg("Pas assez de crypto pour construire ce bâtiment.");
       setTimeout(() => setErrorMsg(""), 2000);
+      return;
+    }
+    
+    // Gestion spéciale pour le bombardement aérien
+    if (building.name === 'Bombardement aérien') {
+      // Vérifier si on a assez de ressources
+      if (resources.gold < building.cost) {
+        setErrorMsg("Pas assez de crypto pour le bombardement aérien.");
+        setTimeout(() => setErrorMsg(""), 2000);
+        return;
+      }
+      
+      // Activer le mode bombardement
+      setPendingAirStrike(true);
+      setErrorMsg("Cliquez sur la carte pour choisir la zone de bombardement");
+      setTimeout(() => setErrorMsg(""), 3000);
       return;
     }
     
@@ -396,6 +590,8 @@ function App() {
         ownerSlot: mySlot 
       };
       
+      console.log('🏗️ Placement de bâtiment:', buildingToPlace);
+      
       // Déduire le coût du bâtiment des ressources
       setResources(prev => ({
         ...prev,
@@ -404,6 +600,7 @@ function App() {
       
       // Envoyer le bâtiment au serveur
       if (playerHealth[buildingToPlace.ownerSlot] === 0) return;
+      console.log('🏗️ Envoi place_building au serveur:', { ...buildingToPlace, sessionId });
       socket.emit('place_building', { ...buildingToPlace, sessionId });
     }
   }
@@ -470,7 +667,7 @@ function App() {
   console.log('RENDER buildings:', buildings.map(b => b.id));
 
   // Log pour debug : voir la valeur de gold et de la production à chaque re-render
-  console.log('[RENDER] gold:', resources.gold, 'cryptoPerSec:', resources.cryptoPerSec);
+  console.log('[RENDER] gold:', resources.gold, 'cryptoPerSec:', resources.cryptoPerSec, 'gameStarted:', gameStarted, 'mySlot:', mySlot);
 
   const isEliminated = mySlot >= 0 && playerHealth[mySlot] === 0;
 
@@ -521,6 +718,25 @@ function App() {
       }
     });
   }
+
+  // Fermer le menu des missiles quand on clique en dehors
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (missileMenu) {
+        // Vérifier si le clic est en dehors du menu des missiles
+        const missileMenuElement = document.querySelector('[data-missile-menu]');
+        if (missileMenuElement && !missileMenuElement.contains(e.target)) {
+          console.log('[CLICK] Click outside missile menu, closing it');
+          setMissileMenu(null);
+        }
+      }
+    };
+
+    document.addEventListener('click', handleClickOutside);
+    return () => {
+      document.removeEventListener('click', handleClickOutside);
+    };
+  }, [missileMenu]);
 
   if (inLobby) {
     return (
@@ -584,7 +800,7 @@ function App() {
     <div
       style={{ textAlign: 'center', width: '100vw', height: '100vh', margin: 0, padding: 0, overflow: 'hidden', background: '#222' }}
     >
-      <h1 style={{ color: '#fff', margin: 0, padding: 10 }}>RTS Navigateur.io</h1>
+      <h1 style={{ color: '#fff', fontSize: 20, margin: 2, padding: 2, lineHeight: '1.1' }}>RTS Navigateur.io</h1>
       {sessionId && (
         <div style={{color:'#4a90e2',fontWeight:'bold',fontSize:18,marginBottom:8}}>
           Partie : {sessionList.find(s => s.id === sessionId)?.name || sessionId}
@@ -607,7 +823,7 @@ function App() {
         border: '2px solid #4a90e2',
       }}>
         <div style={{fontWeight:'bold',fontSize:20,marginBottom:8}}>Ressources</div>
-        <div>💾 Datas : <b>{resources.datas}</b> (+20,000/s)</div>
+        <div>💾 Datas : <b>{resources.datas}</b> (+{resources.datasPerSec || INITIAL_RESOURCES.datasPerSec}/s)</div>
         <div>💰 Crypto : <b>{resources.gold}</b> (+{resources.cryptoPerSec || BASE_GOLD_PER_SEC}/s)</div>
         <div style={{marginTop:6}}>👥 Population : <b>{resources.population}</b> / {resources.populationMax}</div>
       </div>
@@ -621,9 +837,7 @@ function App() {
             </div>
           )}
           {gameStarted && (
-            <div style={{ color: '#4caf50', fontSize: 28, margin: 10 }}>
-              Partie lancée !
-            </div>
+            null
           )}
           <div style={{ width: '100vw', overflow: 'hidden', position: 'relative' }}>
             <div style={{ 
@@ -644,7 +858,7 @@ function App() {
                   background: '#181818',
                   borderRadius: 20,
                   boxShadow: '0 0 30px #000a',
-                  cursor: isDragging ? 'grabbing' : 'grab',
+                  cursor: isDragging ? 'grabbing' : (pendingAirStrike ? 'crosshair' : 'grab'),
                   transform: `scale(${zoom}) translate(${mapOffset.x / zoom}px, ${mapOffset.y / zoom}px)`,
                   transformOrigin: `${zoomCenter.x}% ${zoomCenter.y}%`,
                   maxWidth: '100vw',
@@ -721,13 +935,26 @@ function App() {
                         {pseudo && (
                           <text
                             x={x + SEGMENT_WIDTH / 2}
-                            y={svgHeight * 0.89}
+                            y={pseudo.includes('Bot') ? svgHeight * 0.93 : svgHeight * 0.89}
                             textAnchor="middle"
                             fontSize={14}
                             fontWeight="bold"
                             fill={PLAYER_COLORS[ownerSlot]}
                           >
                             {pseudo}
+                          </text>
+                        )}
+                        {/* Indicateur de bot */}
+                        {pseudo && pseudo.includes('Bot') && (
+                          <text
+                            x={x + SEGMENT_WIDTH / 2}
+                            y={svgHeight * 0.89}
+                            textAnchor="middle"
+                            fontSize={12}
+                            fontWeight="bold"
+                            fill="#ff6b6b"
+                          >
+                            🤖 AI
                           </text>
                         )}
                       </g>
@@ -750,6 +977,14 @@ function App() {
                         opacity={0.3}
                       />
                     )}
+                    <circle
+                      cx={b.x}
+                      cy={b.y}
+                      r="8"
+                      fill={PLAYER_COLORS[b.ownerSlot] || '#999'}
+                      stroke={PLAYER_COLORS[b.ownerSlot] || '#999'}
+                      strokeWidth="2"
+                    />
                     <text
                       x={b.x}
                       y={b.y}
@@ -768,6 +1003,101 @@ function App() {
                     </text>
                   </g>
                 ))}
+                
+                {/* Animation de l'avion de bombardement */}
+                {airStrikeAnimation && airStrikeData && (
+                  <g>
+                    {/* Trajectoire de l'avion (ligne pointillée) */}
+                    <line
+                      x1={airStrikeData.startX}
+                      y1={airStrikeData.startY}
+                      x2={airStrikeData.targetX}
+                      y2={airStrikeData.targetY}
+                      stroke="#ff8800"
+                      strokeWidth="2"
+                      strokeDasharray="5,5"
+                      opacity="0.6"
+                    />
+                    
+                    {/* Avion en mouvement */}
+                    <g
+                      transform={`
+                        translate(${
+                          airStrikeData.startX + (airStrikeData.targetX - airStrikeData.startX) * airStrikeData.progress
+                        }, ${
+                          airStrikeData.startY + (airStrikeData.targetY - airStrikeData.startY) * airStrikeData.progress
+                        })
+                        rotate(${
+                          Math.atan2(
+                            airStrikeData.targetY - airStrikeData.startY,
+                            airStrikeData.targetX - airStrikeData.startX
+                          ) * 180 / Math.PI
+                        })
+                      `}
+                    >
+                      <text
+                        x="0"
+                        y="0"
+                        textAnchor="middle"
+                        fontSize="20"
+                        fill="#ff8800"
+                        fontWeight="bold"
+                      >
+                        🛩️
+                      </text>
+                    </g>
+                  </g>
+                )}
+                
+                {/* Animation d'explosion */}
+                {explosionAnimation && airStrikeData && (
+                  <g>
+                    {/* Cercle d'explosion qui grandit */}
+                    <circle
+                      cx={airStrikeData.targetX}
+                      cy={airStrikeData.targetY}
+                      r="100"
+                      fill="none"
+                      stroke="#ff4444"
+                      strokeWidth="3"
+                      opacity="0.8"
+                    />
+                    
+                    {/* Effet d'explosion central */}
+                    <circle
+                      cx={airStrikeData.targetX}
+                      cy={airStrikeData.targetY}
+                      r="20"
+                      fill="#ff8800"
+                      opacity="0.9"
+                    >
+                      <animate
+                        attributeName="r"
+                        values="0;30;0"
+                        dur="1s"
+                        repeatCount="1"
+                      />
+                      <animate
+                        attributeName="opacity"
+                        values="1;0"
+                        dur="1s"
+                        repeatCount="1"
+                      />
+                    </circle>
+                    
+                    {/* Icône d'explosion */}
+                    <text
+                      x={airStrikeData.targetX}
+                      y={airStrikeData.targetY + 5}
+                      textAnchor="middle"
+                      fontSize="24"
+                      fill="#ff4444"
+                      fontWeight="bold"
+                    >
+                      💥
+                    </text>
+                  </g>
+                )}
                 
                 {/* Missiles */}
                 {missiles.map((missile, i) => {
@@ -906,6 +1236,7 @@ function App() {
             {/* Menu de sélection du type de missile */}
             {missileMenu && (
               <div
+                data-missile-menu
                 style={{
                   position: 'fixed',
                   left: missileMenu.x,
@@ -925,7 +1256,7 @@ function App() {
                   <div
                     key={missile.type}
                     style={{
-                      cursor: resources.datas >= missile.cost ? 'pointer' : 'not-allowed',
+                      cursor: resources.gold >= missile.cost ? 'pointer' : 'not-allowed',
                       padding: '8px 10px',
                       borderRadius: 6,
                       display: 'flex',
@@ -933,34 +1264,32 @@ function App() {
                       justifyContent: 'space-between',
                       gap: 8,
                       fontSize: 16,
-                      backgroundColor: resources.datas >= missile.cost ? missile.color + '22' : '#f0f0f0',
-                      color: resources.datas >= missile.cost ? '#000' : '#999',
-                      border: resources.datas >= missile.cost ? 'none' : '1px solid #ddd',
+                      backgroundColor: resources.gold >= missile.cost ? missile.color + '22' : '#f0f0f0',
+                      color: resources.gold >= missile.cost ? '#000' : '#999',
+                      border: resources.gold >= missile.cost ? 'none' : '1px solid #ddd',
                       marginBottom: 4
                     }}
                     onClick={() => {
-                      if (resources.datas >= missile.cost) {
+                      if (resources.gold >= missile.cost) {
+                        fireMissile(missileMenu.buildingId, missile.type);
                         setMissileMenu(null);
-                        socket.emit('set_barrack_missile_type', {
-                          buildingId: missileMenu.buildingId,
-                          missileType: missile.type,
-                          sessionId
-                        });
                       }
                     }}
                   >
                     <span style={{fontWeight:'bold'}}>{missile.label}</span>
-                    <span style={{fontSize:14}}>Coût : {missile.cost.toLocaleString()} datas</span>
+                    <span style={{fontSize:14}}>Coût : {missile.cost.toLocaleString()} crypto</span>
                   </div>
                 ))}
                 <div
                   style={{marginTop:8,textAlign:'right',fontSize:13,cursor:'pointer',color:'#888'}}
                   onClick={() => {
-                    setMissileMenu(null);
                     // Si aucun missile n'a été sélectionné, tirer le moins cher
-                    const affordable = MISSILE_TYPES.filter(m => resources.datas >= m.cost);
+                    const affordable = MISSILE_TYPES.filter(m => resources.gold >= m.cost);
                     const cheapest = affordable.sort((a, b) => a.cost - b.cost)[0];
-                    if (cheapest) fireMissile(missileMenu.buildingId, cheapest.type);
+                    if (cheapest) {
+                      fireMissile(missileMenu.buildingId, cheapest.type);
+                    }
+                    setMissileMenu(null);
                   }}
                 >Tirer le moins cher</div>
                 <div
@@ -1018,8 +1347,39 @@ function App() {
       </div>
       {/* Message d'erreur */}
       {errorMsg && (
-        <div style={{position:'fixed',top:20,left:0,right:0,textAlign:'center',color:'#fff',background:'#b71c1c',padding:10,borderRadius:8,zIndex:3000,fontWeight:'bold',fontSize:18,boxShadow:'0 2px 8px #0007'}}>
+        <div style={{
+          position: 'fixed',
+          top: 20,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          background: '#ff4444',
+          color: 'white',
+          padding: '10px 20px',
+          borderRadius: 10,
+          zIndex: 1000,
+          fontWeight: 'bold'
+        }}>
           {errorMsg}
+        </div>
+      )}
+      
+      {/* Indicateur de mode bombardement */}
+      {pendingAirStrike && (
+        <div style={{
+          position: 'fixed',
+          top: 80,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          background: '#ff8800',
+          color: 'white',
+          padding: '12px 24px',
+          borderRadius: 10,
+          zIndex: 1000,
+          fontWeight: 'bold',
+          fontSize: '16px',
+          boxShadow: '0 4px 16px #0006'
+        }}>
+          🛩️ Mode Bombardement - Cliquez sur la carte pour choisir la zone
         </div>
       )}
     </div>
