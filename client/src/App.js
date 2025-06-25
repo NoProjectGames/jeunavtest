@@ -99,6 +99,7 @@ function App() {
   const [airStrikeAnimation, setAirStrikeAnimation] = useState(false);
   const [airStrikeData, setAirStrikeData] = useState(null);
   const [explosionAnimation, setExplosionAnimation] = useState(false);
+  const [showBlackMarket, setShowBlackMarket] = useState(false);
 
   const svgHeight = 700;
   const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
@@ -296,9 +297,13 @@ function App() {
       console.log('[PROD] setResources called');
       // Utilise directement les states
       const SEGMENT_WIDTH_LOCAL = MAP_WIDTH / NB_PLAYERS;
-      const mySegments = Object.entries(effectiveSegmentsByPlayer)
+      let mySegments = Object.entries(effectiveSegmentsByPlayer)
         .filter(([segIdx, owner]) => owner === effectiveMySlot)
         .map(([segIdx]) => parseInt(segIdx));
+      // Correction : si aucun segment trouvé, prendre le segment d'origine
+      if (mySegments.length === 0 && effectiveMySlot !== null) {
+        mySegments = [effectiveMySlot];
+      }
       const myBuildings = buildings.filter(b => {
         const segIdx = Math.floor(b.x / SEGMENT_WIDTH_LOCAL);
         return mySegments.includes(segIdx);
@@ -308,13 +313,9 @@ function App() {
       const nbServeurs = myBuildings.filter(b => b.name === 'Serveur').length;
       const goldGain = BASE_GOLD_PER_SEC + nbCryptoFarms * CRYPTO_FARM_BONUS;
       const datasGain = 20000 + nbServeurs * 10000; // 20k base + 10k par Serveur
-      
-      console.log('[PROD][DEBUG] effectiveMySlot:', effectiveMySlot, 'mySlot:', mySlot);
-      console.log('[PROD][DEBUG] Tous les bâtiments:', buildings.map(b => `${b.name} (P${b.ownerSlot})`));
-      console.log('[PROD][DEBUG] Mes bâtiments:', myBuildings.map(b => `${b.name} (P${b.ownerSlot})`));
-      console.log('[PROD][DEBUG] nbCryptoFarms:', nbCryptoFarms, 'nbServeurs:', nbServeurs, 'datasGain:', datasGain);
-      console.log('[PROD][DEBUG] buildings:', JSON.stringify(buildings));
-      console.log('[PROD][DEBUG] mySegments:', mySegments, '| myBuildings:', myBuildings, '| nbCryptoFarms:', nbCryptoFarms, '| nbServeurs:', nbServeurs, '| goldGain:', goldGain, '| datasGain:', datasGain);
+      // Log debug
+      console.log('[PROD][DEBUG] mySegments utilisés pour la prod:', mySegments);
+      console.log('[PROD][DEBUG] Bâtiments pris en compte:', myBuildings.map(b => `${b.name} (P${b.ownerSlot})`));
       setResources(prev => {
         let newPop = prev.population;
         if (prev.population < prev.populationMax) {
@@ -323,8 +324,6 @@ function App() {
         const newPopMax = INITIAL_RESOURCES.populationMax + nbChateaux * CHATEAU_POP_BONUS;
         const newGold = prev.gold + goldGain;
         const newDatas = prev.datas + datasGain;
-        
-        console.log('[PROD] gold:', newGold, 'crypto/s:', goldGain, '| datas:', newDatas, 'datas/s:', datasGain);
         return {
           ...prev,
           gold: newGold,
@@ -392,6 +391,8 @@ function App() {
   }
 
   function handleMapClickForBuild(e) {
+    // S'assurer que SEGMENT_WIDTH est bien défini
+    const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
     console.log('[CLICK] handleMapClickForBuild called, missileMenu:', missileMenu, 'buildMenu:', buildMenu);
     
     // Fermer le menu des missiles si ouvert
@@ -526,7 +527,6 @@ function App() {
       y = ((e.clientY - rect.top) / rect.height) * svgHeight;
     }
     // Vérifier si le clic est sur la barre de vie
-    const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
     const segmentStart = mySlot * SEGMENT_WIDTH;
     const segmentCenter = segmentStart + SEGMENT_WIDTH / 2;
     if (x >= segmentCenter - 8 && x <= segmentCenter + 8 && y >= 140 && y <= 560) {
@@ -537,6 +537,7 @@ function App() {
     
     // Sauvegarder les coordonnées du clic
     setLastClick({ x, y, error: false });
+    console.log('[DEBUG CLICK] Clic sur la carte pour construction :', { x, y });
     
     // Vérifier que le clic est dans la zone de construction (zone grise)
     const mapTop = svgHeight * 0.2;
@@ -552,6 +553,7 @@ function App() {
     
     // Ouvrir le menu de construction
     setBuildMenu({ x: e.clientX, y: e.clientY });
+    console.log('[DEBUG CLICK] Menu de construction ouvert');
   }
 
   function handleBuildingSelect(building) {
@@ -566,39 +568,28 @@ function App() {
     
     // Gestion spéciale pour le bombardement aérien
     if (building.name === 'Bombardement aérien') {
-      // Vérifier si on a assez de ressources
       if (resources.gold < building.cost) {
         setErrorMsg("Pas assez de crypto pour le bombardement aérien.");
         setTimeout(() => setErrorMsg(""), 2000);
         return;
       }
-      
-      // Activer le mode bombardement
       setPendingAirStrike(true);
       setErrorMsg("Cliquez sur la carte pour choisir la zone de bombardement");
       setTimeout(() => setErrorMsg(""), 3000);
       return;
     }
-    
-    // Utiliser les coordonnées du dernier clic pour placer le bâtiment
     if (lastClick && !lastClick.error) {
-      // Créer le bâtiment avec l'information du propriétaire
       const buildingToPlace = { 
         x: lastClick.x, 
         y: lastClick.y, 
         ...building, 
         ownerSlot: mySlot 
       };
-      
-      console.log('🏗️ Placement de bâtiment:', buildingToPlace);
-      
-      // Déduire le coût du bâtiment des ressources
+      console.log('[DEBUG BUILD] Tentative de construction :', buildingToPlace, '| gold:', resources.gold, '| lastClick:', lastClick);
       setResources(prev => ({
         ...prev,
         gold: prev.gold - building.cost
       }));
-      
-      // Envoyer le bâtiment au serveur
       if (playerHealth[buildingToPlace.ownerSlot] === 0) return;
       console.log('🏗️ Envoi place_building au serveur:', { ...buildingToPlace, sessionId });
       socket.emit('place_building', { ...buildingToPlace, sessionId });
@@ -737,6 +728,13 @@ function App() {
       document.removeEventListener('click', handleClickOutside);
     };
   }, [missileMenu]);
+
+  // Ajout : fonction pour calculer le coût dynamique côté client
+  function getDynamicBuildingCostClient(buildingName) {
+    const myBuildings = buildings.filter(b => b.ownerSlot === mySlot && b.name === buildingName);
+    const base = (BUILDINGS.find(b => b.name === buildingName) || {}).cost || 0;
+    return base * Math.pow(2, myBuildings.length);
+  }
 
   if (inLobby) {
     return (
@@ -1170,7 +1168,8 @@ function App() {
                   color: '#4a90e2'
                 }}>Construire un bâtiment</div>
                 {BUILDINGS.map(b => {
-                  const canAfford = resources.gold >= b.cost;
+                  const dynamicCost = getDynamicBuildingCostClient(b.name);
+                  const canAfford = resources.gold >= dynamicCost;
                   return (
                     <div
                       key={b.name}
@@ -1197,7 +1196,7 @@ function App() {
                           }
                         })
                       }}
-                      onClick={() => canAfford && handleBuildingSelect(b)}
+                      onClick={() => canAfford && handleBuildingSelect({ ...b, cost: dynamicCost })}
                     >
                       <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
                         <span style={{fontSize: 24}}>{b.icon}</span>
@@ -1205,14 +1204,14 @@ function App() {
                       </div>
                       <div style={{
                         fontSize: 16,
-                        color: canAfford ? (resources.gold >= b.cost ? '#4caf50' : '#ff9800') : '#999',
+                        color: canAfford ? (resources.gold >= dynamicCost ? '#4caf50' : '#ff9800') : '#999',
                         fontWeight: 'bold',
                         backgroundColor: canAfford ? '#f0f8ff' : '#f5f5f5',
                         padding: '8px 12px',
                         borderRadius: 6,
                         border: `1px solid ${canAfford ? '#4caf50' : '#ddd'}`
                       }}>
-                        {b.cost.toLocaleString()}
+                        {dynamicCost.toLocaleString()}
                       </div>
                     </div>
                   );
@@ -1380,6 +1379,100 @@ function App() {
           boxShadow: '0 4px 16px #0006'
         }}>
           🛩️ Mode Bombardement - Cliquez sur la carte pour choisir la zone
+        </div>
+      )}
+      {/* Bouton Marché Noir en bas à droite */}
+      <button
+        style={{
+          position: 'fixed',
+          right: 30,
+          bottom: 30,
+          zIndex: 3000,
+          background: '#181818',
+          color: '#fff',
+          border: '2px solid #333',
+          borderRadius: 16,
+          fontSize: 22,
+          fontWeight: 'bold',
+          padding: '16px 28px',
+          boxShadow: '0 2px 12px #0007',
+          cursor: 'pointer',
+          transition: 'all 0.2s',
+        }}
+        onClick={() => setShowBlackMarket(true)}
+      >
+        🕳️ Marché Noir
+      </button>
+      {/* Modale Marché Noir */}
+      {showBlackMarket && (
+        <div
+          style={{
+            position: 'fixed',
+            left: 0,
+            top: 0,
+            width: '100vw',
+            height: '100vh',
+            background: 'rgba(0,0,0,0.55)',
+            zIndex: 4000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+          onClick={() => setShowBlackMarket(false)}
+        >
+          <div
+            style={{
+              background: '#232323',
+              borderRadius: 18,
+              padding: '38px 44px 32px 44px',
+              minWidth: 340,
+              minHeight: 180,
+              boxShadow: '0 8px 32px #000a',
+              position: 'relative',
+              color: '#fff',
+              border: '3px solid #4a90e2',
+              textAlign: 'center',
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{fontSize: 28, fontWeight: 'bold', marginBottom: 18, letterSpacing: 1}}>🕳️ Marché Noir</div>
+            <div style={{fontSize: 20, marginBottom: 12, fontWeight: 'bold'}}>Missile nucléaire</div>
+            <div style={{fontSize: 16, marginBottom: 18}}>Détruit tous les bâtiments d'un segment adverse.<br/>Prix : <b style={{color:'#ffeb3b'}}>200 000 crypto</b></div>
+            <button
+              style={{
+                background: '#b71c1c',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 10,
+                fontSize: 18,
+                fontWeight: 'bold',
+                padding: '12px 28px',
+                marginTop: 10,
+                cursor: 'pointer',
+                boxShadow: '0 2px 8px #0006',
+                transition: 'all 0.2s',
+              }}
+              onClick={() => alert('Achat fictif du missile nucléaire (logique à venir)')}
+            >
+              Acheter
+            </button>
+            <button
+              style={{
+                position: 'absolute',
+                top: 10,
+                right: 18,
+                background: 'none',
+                color: '#fff',
+                border: 'none',
+                fontSize: 26,
+                cursor: 'pointer',
+              }}
+              onClick={() => setShowBlackMarket(false)}
+              title="Fermer"
+            >
+              ×
+            </button>
+          </div>
         </div>
       )}
     </div>
