@@ -23,13 +23,12 @@ const BOT_BUILDINGS = [
   { name: 'Lance Missile', icon: '🚀', cost: 50000, priority: 2 },
   { name: 'Serveur', icon: '🖥️', cost: 75000, priority: 3 },
   { name: 'Antimissile', icon: '🛡️', cost: 20000, priority: 4 },
-  { name: 'Château', icon: '🏛️', cost: 35000, priority: 5 },
   { name: 'Centre Médical', icon: '🏥', cost: 100000, priority: 6 },
   { name: 'Usine de Drones', icon: '🤖', cost: 55000, priority: 7 }
 ];
 
 // Configuration des ressources
-const INITIAL_RESOURCES = { gold: 30000, datas: 100000, population: 10, populationMax: 20, cryptoPerSec: 1000, datasPerSec: 20000 };
+const INITIAL_RESOURCES = { gold: 30000, datas: 100000, cryptoPerSec: 1000, datasPerSec: 20000 };
 const BASE_GOLD_PER_SEC = 1000;
 const CRYPTO_FARM_BONUS = 5000;
 
@@ -961,30 +960,95 @@ io.on('connection', (socket) => {
   socket.on('get_black_market', ({ sessionId }, cb) => {
     const session = sessions[sessionId];
     if (!session || !session.blackMarket) return cb && cb({ error: 'Session not found' });
-    cb && cb(getCurrentBlackMarketItem(session));
+    cb && cb(BLACK_MARKET_ITEMS); // Retourner tous les objets au lieu d'un seul
   });
 
   // Achat d'un objet du marché noir
-  socket.on('buy_black_market', ({ sessionId, playerIndex }, cb) => {
+  socket.on('buy_black_market', ({ sessionId, playerIndex, itemId }, cb) => {
     const session = sessions[sessionId];
     if (!session || !session.blackMarket) return cb && cb({ error: 'Session not found' });
-    const item = getCurrentBlackMarketItem(session);
+    
+    // Trouver l'objet par son ID
+    const item = BLACK_MARKET_ITEMS.find(i => i.id === itemId);
+    if (!item) return cb && cb({ error: 'Objet introuvable.' });
+    
     const player = session.players[playerIndex];
-    if (!player || player.gold < item.price) return cb && cb({ error: 'Pas assez de crypto.' });
-    // Déduire le coût
-    player.gold -= item.price;
-    // Appliquer l'effet (exemple pour le nuke)
+    if (!player) return cb && cb({ error: 'Joueur introuvable.' });
+    
+    // Vérifier si le joueur a assez de gold
+    if (player.gold < item.price) return cb && cb({ error: 'Pas assez de crypto.' });
+    
+    // Pour la nuke, on ne retire pas le gold immédiatement, juste on active le flag
     if (item.effect === 'nuke_segment') {
-      // À compléter côté client : demander sur quel segment appliquer
-      // Ici, on ne fait rien (logique à compléter)
+      player.pendingNuke = true;
+      cb && cb({ success: true, item });
+      io.to(session.sessionId).emit('players_update', session.players);
+      return;
     }
+    
+    // Pour les autres objets, retirer le gold immédiatement
+    player.gold -= item.price;
+    
+    // Appliquer l'effet
     if (item.effect === 'heal_base') {
       session.playerHealth[playerIndex] = 100;
       io.to(session.sessionId).emit('health_update', session.playerHealth);
     }
+    if (item.effect === 'crypto_boost') {
+      // Activer le boost de production pendant 15 secondes
+      player.cryptoBoostEndTime = Date.now() + 15000; // 15 secondes
+      console.log(`[BOOST] Joueur ${playerIndex} a activé le boost de crypto jusqu'à ${new Date(player.cryptoBoostEndTime)}`);
+    }
     // ... autres effets ...
     cb && cb({ success: true, item });
     io.to(session.sessionId).emit('players_update', session.players);
+  });
+
+  // Utilisation de la nuke (missile nucléaire)
+  socket.on('use_nuke', ({ sessionId, targetSlot }, cb) => {
+    const session = sessions[sessionId];
+    if (!session || !session.gameStarted) return cb && cb({ error: 'Session introuvable ou partie non démarrée.' });
+    if (typeof targetSlot !== 'number' || targetSlot < 0 || targetSlot > 7) return cb && cb({ error: 'Slot cible invalide.' });
+    
+    // Trouver le joueur qui utilise la nuke
+    const player = session.players.find(p => p && p.id === socket.id);
+    if (!player || !player.pendingNuke) return cb && cb({ error: 'Vous n\'avez pas de nuke à utiliser.' });
+    
+    // Vérifier que le joueur a assez de gold pour la nuke
+    const nukePrice = 200000;
+    if (player.gold < nukePrice) return cb && cb({ error: 'Pas assez de crypto pour utiliser la nuke.' });
+    
+    // Retirer le gold maintenant que l'utilisation va réussir
+    player.gold -= nukePrice;
+    
+    // Consommer la nuke
+    player.pendingNuke = false;
+    
+    // Trouver tous les bâtiments du slot ciblé
+    let destroyed = 0;
+    for (let i = session.buildings.length - 1; i >= 0; i--) {
+      const building = session.buildings[i];
+      if (building.ownerSlot === targetSlot) {
+        // Arrêter les timers associés
+        if (building.name === 'Lance Missile') {
+          stopBarrackTimerForSession(session, building);
+        }
+        if (building.name === 'Usine de Drones') {
+          stopDroneFactoryTimerForSession(session, building);
+        }
+        session.buildings.splice(i, 1);
+        destroyed++;
+      }
+    }
+    
+    if (destroyed > 0) {
+      io.to(sessionId).emit('buildings_update', session.buildings);
+    }
+    
+    // Mettre à jour les ressources du joueur
+    io.to(session.sessionId).emit('players_update', session.players);
+    
+    cb && cb({ success: true, destroyed });
   });
 });
 
@@ -1103,7 +1167,19 @@ function startGameForSession(sessionId) {
           const nbServeurs = myBuildings.filter(b => b.name === 'Serveur').length;
           const goldGain = BASE_GOLD_PER_SEC + nbCryptoFarms * CRYPTO_FARM_BONUS;
           const datasGain = 20000 + nbServeurs * 10000;
-          player.gold += goldGain;
+          
+          // Appliquer le boost de crypto si actif
+          let finalGoldGain = goldGain;
+          if (player.cryptoBoostEndTime && Date.now() < player.cryptoBoostEndTime) {
+            finalGoldGain = goldGain * 2; // Double la production
+            console.log(`[BOOST] Joueur ${slot} - Production boostée: ${goldGain} -> ${finalGoldGain} crypto`);
+          } else if (player.cryptoBoostEndTime && Date.now() >= player.cryptoBoostEndTime) {
+            // Nettoyer le boost expiré
+            console.log(`[BOOST] Boost expiré pour le joueur ${slot}`);
+            delete player.cryptoBoostEndTime;
+          }
+          
+          player.gold += finalGoldGain;
           player.datas += datasGain;
           // Envoi au joueur
           const sock = Array.from(io.sockets.sockets.values()).find(s => s.id === player.id && s.sessionId === sessionId);
@@ -1316,7 +1392,7 @@ function stopDroneFactoryTimerForSession(session, factory) {
   }
 }
 function createDroneFromFactoryForSession(session, factory) {
-  // Trouver une cible ennemie (bâtiment uniquement)
+  // Trouver une cible ennemie (Antimissile uniquement)
   const screenWidth = 1920;
   const segmentWidth = screenWidth / 8;
   const segmentStart = factory.ownerSlot * segmentWidth;
@@ -1324,9 +1400,10 @@ function createDroneFromFactoryForSession(session, factory) {
   const segmentMidpoint = segmentStart + segmentWidth / 2;
   const direction = factory.x < segmentMidpoint ? -1 : 1;
 
-  // Chercher uniquement des bâtiments ennemis dans la bonne direction
-  const enemyBuildings = session.buildings.filter(b => {
+  // Chercher uniquement des bâtiments ennemis de type 'Antimissile' dans la bonne direction
+  const enemyAntimissiles = session.buildings.filter(b => {
     if (b.ownerSlot === factory.ownerSlot) return false;
+    if (b.name !== 'Antimissile') return false;
     if (direction === 1) {
       return b.x >= segmentMidpoint;
     } else {
@@ -1334,18 +1411,26 @@ function createDroneFromFactoryForSession(session, factory) {
     }
   });
 
-  if (enemyBuildings.length === 0) {
-    // Aucun bâtiment ennemi dans la direction : ne rien faire
+  if (enemyAntimissiles.length === 0) {
+    // Aucun antimissile ennemi dans la direction : ne rien faire
     return;
   }
 
-  // Cibler un bâtiment ennemi aléatoire
-  const randomBuilding = enemyBuildings[Math.floor(Math.random() * enemyBuildings.length)];
+  // Trouver l'antimissile ennemi le plus proche
+  let closest = null;
+  let minDist = Infinity;
+  for (const b of enemyAntimissiles) {
+    const dist = Math.sqrt((factory.x - b.x) ** 2 + (factory.y - b.y) ** 2);
+    if (dist < minDist) {
+      minDist = dist;
+      closest = b;
+    }
+  }
   const target = {
-    x: randomBuilding.x,
-    y: randomBuilding.y,
+    x: closest.x,
+    y: closest.y,
     type: 'building',
-    id: randomBuilding.id || 'building'
+    id: closest.id || 'building'
   };
 
   const drone = {
@@ -1579,9 +1664,7 @@ function createBotPlayer(sessionId, slot) {
     pseudo: botName,
     isBot: true,
     gold: INITIAL_RESOURCES.gold,
-    datas: INITIAL_RESOURCES.datas,
-    population: INITIAL_RESOURCES.population,
-    populationMax: INITIAL_RESOURCES.populationMax
+    datas: INITIAL_RESOURCES.datas
   };
   
   console.log(`[SESSION ${session.name}] 🤖 Bot créé: ${botName} sur slot ${slot}`);
@@ -1748,12 +1831,8 @@ function decideBotBuilding(sessionId, slot) {
   if (annexedSegments.length > 0) {
     for (const seg of annexedSegments) {
       const hasAnti = session.buildings.some(b => b.ownerSlot === slot && Math.abs(b.x - (seg * SEGMENT_WIDTH + SEGMENT_WIDTH/2)) < 60 && b.name === 'Antimissile');
-      const hasChateau = session.buildings.some(b => b.ownerSlot === slot && Math.abs(b.x - (seg * SEGMENT_WIDTH + SEGMENT_WIDTH/2)) < 60 && b.name === 'Château');
       if (!hasAnti && bot.gold >= 20000) {
         return { name: 'Antimissile', icon: '🛡️', cost: 20000, priority: 0, force: true, xTarget: seg * SEGMENT_WIDTH + SEGMENT_WIDTH/2 };
-      }
-      if (!hasChateau && bot.gold >= 35000) {
-        return { name: 'Château', icon: '🏛️', cost: 35000, priority: 0, force: true };
       }
     }
   }
@@ -1783,9 +1862,6 @@ function decideBotBuilding(sessionId, slot) {
   if (isUnderThreat) {
     if (bot.gold >= 20000 && !botBuildings.some(b => b.name === 'Antimissile')) {
       return { name: 'Antimissile', icon: '🛡️', cost: 20000, priority: 0 };
-    }
-    if (bot.gold >= 35000 && !botBuildings.some(b => b.name === 'Château')) {
-      return { name: 'Château', icon: '🏛️', cost: 35000, priority: 0 };
     }
     if (bot.gold >= 100000 && !botBuildings.some(b => b.name === 'Centre Médical')) {
       return { name: 'Centre Médical', icon: '🏥', cost: 100000, priority: 0 };
@@ -1853,7 +1929,7 @@ function placeBotBuilding(sessionId, slot, building) {
   const minDistance = 50;
   const margin = 30;
   // Placement prioritaire à gauche ou à droite de la barre de vie pour les bâtiments principaux
-  const mainBuildings = ['Lance Missile', 'Crypto Farm', 'Serveur', 'Château', 'Usine de Drones'];
+  const mainBuildings = ['Lance Missile', 'Crypto Farm', 'Serveur', 'Usine de Drones'];
   if (mainBuildings.includes(building.name)) {
     // Placement spécial pour slots extrêmes
     let offset;
@@ -1982,6 +2058,14 @@ const BLACK_MARKET_ITEMS = [
     effect: 'nuke_segment',
   },
   {
+    id: 'crypto_boost',
+    name: 'Boost de Production',
+    description: "Double votre production de crypto pendant 15 secondes.",
+    price: 250000,
+    icon: '⚡',
+    effect: 'crypto_boost',
+  },
+  {
     id: 'heal',
     name: 'Sérum de Résurrection',
     description: "Rend toute la vie à votre base principale.",
@@ -2006,10 +2090,11 @@ function initBlackMarketForSession(session) {
     currentIndex: 0,
     timer: null,
   };
-  session.blackMarket.timer = setInterval(() => {
-    session.blackMarket.currentIndex = (session.blackMarket.currentIndex + 1) % BLACK_MARKET_ITEMS.length;
-    io.to(session.sessionId).emit('black_market_update', getCurrentBlackMarketItem(session));
-  }, 2 * 60 * 1000); // 2 minutes
+  // Suppression de la rotation automatique - tous les objets sont maintenant affichés en permanence
+  // session.blackMarket.timer = setInterval(() => {
+  //   session.blackMarket.currentIndex = (session.blackMarket.currentIndex + 1) % BLACK_MARKET_ITEMS.length;
+  //   io.to(session.sessionId).emit('black_market_update', getCurrentBlackMarketItem(session));
+  // }, 2 * 60 * 1000); // 2 minutes
 }
 
 function getCurrentBlackMarketItem(session) {

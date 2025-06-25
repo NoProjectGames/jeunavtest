@@ -8,18 +8,15 @@ const BASE_VIEW_RATIO = 0.7;
 const BUILDINGS = [
   { name: 'Lance Missile', icon: '🚀', cost: 50000 },
   { name: 'Crypto Farm', icon: '💻', cost: 25000 },
-  { name: 'Château', icon: '🏛️', cost: 35000 },
   { name: 'Antimissile', icon: '🛡️', cost: 20000 },
   { name: 'Usine de Drones', icon: '🤖', cost: 55000 },
   { name: 'Centre Médical', icon: '🏥', cost: 100000 },
   { name: 'Bombardement aérien', icon: '🛩️', cost: 150000 },
   { name: 'Serveur', icon: '🖥️', cost: 75000 },
 ];
-const INITIAL_RESOURCES = { gold: 30000, datas: 100000, population: 10, populationMax: 20, cryptoPerSec: 1000, datasPerSec: 20000 };
+const INITIAL_RESOURCES = { gold: 30000, datas: 100000, cryptoPerSec: 1000, datasPerSec: 20000 };
 const BASE_GOLD_PER_SEC = 1000;
 const CRYPTO_FARM_BONUS = 5000;
-const BASE_POP_PER_SEC = 0.1;
-const CHATEAU_POP_BONUS = 5;
 const SOLDIER_SPEED = 5;
 const SOLDIER_PROD_TIME = 3000;
 const SOLDIER_SIZE = 22;
@@ -56,6 +53,13 @@ function clamp(val, min, max) {
 }
 function distance(a, b) {
   return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+}
+
+// Fonction utilitaire pour formater les nombres avec K/M
+function formatNumber(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(n % 1e6 === 0 ? 0 : 1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(n % 1e3 === 0 ? 0 : 1) + 'K';
+  return n;
 }
 
 function App() {
@@ -100,6 +104,8 @@ function App() {
   const [airStrikeData, setAirStrikeData] = useState(null);
   const [explosionAnimation, setExplosionAnimation] = useState(false);
   const [showBlackMarket, setShowBlackMarket] = useState(false);
+  const [pendingNukeTarget, setPendingNukeTarget] = useState(false);
+  const [blackMarketItems, setBlackMarketItems] = useState([]);
 
   const svgHeight = 700;
   const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
@@ -273,7 +279,7 @@ function App() {
     }
   }, [inLobby, pseudo, myIndex]);
 
-  // Gain d'or (crypto) et de population chaque seconde
+  // Gain d'or (crypto) et de datas chaque seconde
   useEffect(() => {
     console.log('[PROD] useEffect called, gameStarted:', gameStarted, 'buildings.length:', buildings.length);
     if (!gameStarted) {
@@ -309,7 +315,6 @@ function App() {
         return mySegments.includes(segIdx);
       });
       const nbCryptoFarms = myBuildings.filter(b => b.name === 'Crypto Farm').length;
-      const nbChateaux = myBuildings.filter(b => b.name === 'Château').length;
       const nbServeurs = myBuildings.filter(b => b.name === 'Serveur').length;
       const goldGain = BASE_GOLD_PER_SEC + nbCryptoFarms * CRYPTO_FARM_BONUS;
       const datasGain = 20000 + nbServeurs * 10000; // 20k base + 10k par Serveur
@@ -317,19 +322,12 @@ function App() {
       console.log('[PROD][DEBUG] mySegments utilisés pour la prod:', mySegments);
       console.log('[PROD][DEBUG] Bâtiments pris en compte:', myBuildings.map(b => `${b.name} (P${b.ownerSlot})`));
       setResources(prev => {
-        let newPop = prev.population;
-        if (prev.population < prev.populationMax) {
-          newPop = clamp(prev.population + BASE_POP_PER_SEC, 0, prev.populationMax);
-        }
-        const newPopMax = INITIAL_RESOURCES.populationMax + nbChateaux * CHATEAU_POP_BONUS;
         const newGold = prev.gold + goldGain;
         const newDatas = prev.datas + datasGain;
         return {
           ...prev,
           gold: newGold,
           datas: newDatas,
-          population: newPop,
-          populationMax: newPopMax,
           cryptoPerSec: goldGain, // Stocker la production par seconde
           datasPerSec: datasGain, // Stocker la production de datas par seconde
         };
@@ -736,6 +734,115 @@ function App() {
     return base * Math.pow(2, myBuildings.length);
   }
 
+  // Handler pour achat de la nuke dans le marché noir
+  function handleBuyNuke() {
+    socket.emit('buy_black_market', { sessionId, playerIndex: mySlot }, (res) => {
+      if (res && res.success && res.item && res.item.effect === 'nuke_segment') {
+        setShowBlackMarket(false);
+        setPendingNukeTarget(true);
+        setErrorMsg("Cliquez sur le segment à cibler avec la nuke.");
+        setTimeout(() => setErrorMsg(""), 3000);
+      } else if (res && res.error) {
+        setErrorMsg(res.error);
+        setTimeout(() => setErrorMsg(""), 2000);
+      } else {
+        setErrorMsg("Erreur lors de l'achat de la nuke.");
+        setTimeout(() => setErrorMsg(""), 2000);
+      }
+    });
+  }
+
+  // Handler générique pour achat d'objets du marché noir
+  function handleBuyBlackMarketItem(item) {
+    socket.emit('buy_black_market', { sessionId, playerIndex: mySlot, itemId: item.id }, (res) => {
+      if (res && res.success) {
+        if (item.effect === 'nuke_segment') {
+          setShowBlackMarket(false);
+          setPendingNukeTarget(true);
+          setErrorMsg("Cliquez sur le segment à cibler avec la nuke.");
+          setTimeout(() => setErrorMsg(""), 3000);
+        } else if (item.effect === 'crypto_boost') {
+          setShowBlackMarket(false);
+          setErrorMsg(`⚡ Boost de production activé pendant 15 secondes !`);
+          setTimeout(() => setErrorMsg(""), 3000);
+        } else {
+          setShowBlackMarket(false);
+          setErrorMsg(`${item.name} acheté avec succès !`);
+          setTimeout(() => setErrorMsg(""), 2000);
+        }
+      } else if (res && res.error) {
+        setErrorMsg(res.error);
+        setTimeout(() => setErrorMsg(""), 2000);
+      } else {
+        setErrorMsg("Erreur lors de l'achat.");
+        setTimeout(() => setErrorMsg(""), 2000);
+      }
+    });
+  }
+
+  // Récupérer les objets du marché noir quand on ouvre la modale
+  useEffect(() => {
+    if (showBlackMarket && sessionId) {
+      socket.emit('get_black_market', { sessionId }, (res) => {
+        if (res && !res.error && Array.isArray(res)) {
+          setBlackMarketItems(res); // Le serveur retourne maintenant tous les objets
+        }
+      });
+    }
+  }, [showBlackMarket, sessionId]);
+
+  // Handler de clic sur la map pour la nuke
+  function handleMapClickForNuke(e) {
+    if (!pendingNukeTarget) return false;
+    // Calculer le segment cliqué
+    const svg = svgRef.current;
+    let x;
+    if (svg && typeof svg.createSVGPoint === 'function') {
+      const pt = svg.createSVGPoint();
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+      const ctm = svg.getScreenCTM();
+      if (ctm) {
+        const svgP = pt.matrixTransform(ctm.inverse());
+        x = svgP.x;
+      } else {
+        const rect = svg.getBoundingClientRect();
+        x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
+      }
+    } else {
+      const rect = svg.getBoundingClientRect();
+      x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
+    }
+    const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
+    const segIdx = Math.floor(x / SEGMENT_WIDTH);
+    // On ne peut pas nuker son propre segment
+    if (segIdx === mySlot) {
+      setErrorMsg("Impossible de nuker votre propre segment !");
+      setTimeout(() => setErrorMsg(""), 2000);
+      setPendingNukeTarget(false);
+      return true;
+    }
+    // Envoyer l'événement au serveur
+    socket.emit('use_nuke', { sessionId, targetSlot: segIdx }, (res) => {
+      if (res && res.success) {
+        setErrorMsg("💥 Nuke lancée !");
+      } else {
+        setErrorMsg(res && res.error ? res.error : "Erreur lors de l'utilisation de la nuke.");
+      }
+      setTimeout(() => setErrorMsg(""), 2000);
+      setPendingNukeTarget(false);
+    });
+    return true;
+  }
+
+  // Remplacer le handler de clic sur la map pour prendre en compte la nuke
+  function handleMapClickForBuildOrNuke(e) {
+    if (pendingNukeTarget) {
+      if (handleMapClickForNuke(e)) return;
+    }
+    handleMapClickForBuild(e);
+  }
+
   if (inLobby) {
     return (
       <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', background: '#222', color: '#fff'}}>
@@ -821,9 +928,11 @@ function App() {
         border: '2px solid #4a90e2',
       }}>
         <div style={{fontWeight:'bold',fontSize:20,marginBottom:8}}>Ressources</div>
-        <div>💾 Datas : <b>{resources.datas}</b> (+{resources.datasPerSec || INITIAL_RESOURCES.datasPerSec}/s)</div>
-        <div>💰 Crypto : <b>{resources.gold}</b> (+{resources.cryptoPerSec || BASE_GOLD_PER_SEC}/s)</div>
-        <div style={{marginTop:6}}>👥 Population : <b>{resources.population}</b> / {resources.populationMax}</div>
+        <div>💾 Datas : <b>{formatNumber(resources.datas)}</b> (+{formatNumber(resources.datasPerSec || INITIAL_RESOURCES.datasPerSec)}/s)</div>
+        <div>💰 Crypto : <b>{formatNumber(resources.gold)}</b> (+{formatNumber(resources.cryptoPerSec || BASE_GOLD_PER_SEC)}/s)</div>
+        {players[mySlot] && players[mySlot].cryptoBoostEndTime && Date.now() < players[mySlot].cryptoBoostEndTime && (
+          <div style={{color:'#ffeb3b',fontSize:14,marginTop:4}}>⚡ Boost Crypto actif !</div>
+        )}
       </div>
       {lobbyFull ? (
         <div style={{ color: 'red' }}>Lobby plein, réessayez plus tard.</div>
@@ -863,7 +972,7 @@ function App() {
                   height: 'auto',
                   width: '100%'
                 }}
-                onClick={handleMapClickForBuild}
+                onClick={handleMapClickForBuildOrNuke}
                 onWheel={handleWheel}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
@@ -1436,26 +1545,49 @@ function App() {
             onClick={e => e.stopPropagation()}
           >
             <div style={{fontSize: 28, fontWeight: 'bold', marginBottom: 18, letterSpacing: 1}}>🕳️ Marché Noir</div>
-            <div style={{fontSize: 20, marginBottom: 12, fontWeight: 'bold'}}>Missile nucléaire</div>
-            <div style={{fontSize: 16, marginBottom: 18}}>Détruit tous les bâtiments d'un segment adverse.<br/>Prix : <b style={{color:'#ffeb3b'}}>200 000 crypto</b></div>
-            <button
-              style={{
-                background: '#b71c1c',
-                color: '#fff',
-                border: 'none',
-                borderRadius: 10,
-                fontSize: 18,
-                fontWeight: 'bold',
-                padding: '12px 28px',
-                marginTop: 10,
-                cursor: 'pointer',
-                boxShadow: '0 2px 8px #0006',
-                transition: 'all 0.2s',
-              }}
-              onClick={() => alert('Achat fictif du missile nucléaire (logique à venir)')}
-            >
-              Acheter
-            </button>
+            {blackMarketItems.length > 0 ? (
+              <div style={{maxHeight: '400px', overflowY: 'auto'}}>
+                {blackMarketItems.map((item, index) => (
+                  <div key={item.id} style={{
+                    border: '2px solid #4a90e2',
+                    borderRadius: 12,
+                    padding: '16px',
+                    marginBottom: '12px',
+                    background: '#2a2a2a'
+                  }}>
+                    <div style={{fontSize: 18, marginBottom: 8, fontWeight: 'bold'}}>
+                      {item.icon} {item.name}
+                    </div>
+                    <div style={{fontSize: 14, marginBottom: 12, color: '#ccc'}}>
+                      {item.description}
+                    </div>
+                    <div style={{fontSize: 16, marginBottom: 12}}>
+                      Prix : <b style={{color:'#ffeb3b'}}>{item.price.toLocaleString()} crypto</b>
+                    </div>
+                    <button
+                      style={{
+                        background: '#b71c1c',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: 8,
+                        fontSize: 16,
+                        fontWeight: 'bold',
+                        padding: '10px 20px',
+                        cursor: 'pointer',
+                        boxShadow: '0 2px 8px #0006',
+                        transition: 'all 0.2s',
+                        width: '100%'
+                      }}
+                      onClick={() => handleBuyBlackMarketItem(item)}
+                    >
+                      Acheter
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{fontSize: 16, marginBottom: 18}}>Chargement...</div>
+            )}
             <button
               style={{
                 position: 'absolute',
