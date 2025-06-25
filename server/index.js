@@ -35,18 +35,20 @@ const CRYPTO_FARM_BONUS = 5000;
 // Gestion des sessions (parties)
 let sessions = {};
 
-function createSession(sessionName) {
+function createSession(sessionName, mode = 'standard') {
   // Génère un id unique simple (timestamp + random)
   const sessionId = `${Date.now()}_${Math.floor(Math.random()*10000)}`;
-  const players = Array(8).fill(null); // slots vides
+  const maxPlayers = mode === '1v1' ? 2 : 8;
+  const players = Array(maxPlayers).fill(null); // slots vides
   sessions[sessionId] = {
     sessionId,
     name: sessionName,
+    mode,
     players: players,
     buildings: [],
     missiles: [],
     drones: [],
-    playerHealth: Array(8).fill(100),
+    playerHealth: Array(maxPlayers).fill(100),
     countdown: null,
     countdownValue: 0,
     gameStarted: false,
@@ -56,13 +58,11 @@ function createSession(sessionName) {
     droneFactoryTimers: new Map(),
     buildingIdCounter: 0,
     segmentsByPlayer: new Map(),
-    lastAttacker: Array(8).fill(null),
+    lastAttacker: Array(maxPlayers).fill(null),
     botTimers: new Map(), // Timers pour les bots
   };
-  
-  // Ne pas créer les bots ici, ils seront créés quand la partie commence
-  console.log(`[SESSION ${sessionName}] Session créée sans bots`);
-  
+  // Ne pas créer les bots ici, ils seront créés quand la partie commence (sauf en 1v1)
+  console.log(`[SESSION ${sessionName}] Session créée (${mode})`);
   return sessionId;
 }
 
@@ -221,7 +221,12 @@ function createMissileFromBarrack(barrack) {
   // Déterminer la direction du missile en fonction de la position de la caserne
   // Pour chaque joueur, diviser son segment en deux : gauche = missiles vers la gauche, droite = missiles vers la droite
   const screenWidth = 1920; // Largeur typique d'un écran
-  const segmentWidth = screenWidth / 8; // Largeur d'un segment (8 joueurs)
+  // Adapter la largeur de segment selon le mode de la session
+  const session = Object.values(sessions).find(s => 
+    s.buildings.some(b => b.id === barrack.id)
+  );
+  const nbSegments = session && session.mode === '1v1' ? 2 : 8;
+  const segmentWidth = screenWidth / nbSegments;
   const segmentStart = barrack.ownerSlot * segmentWidth;
   const segmentEnd = segmentStart + segmentWidth;
   const segmentMidpoint = segmentStart + segmentWidth / 2;
@@ -288,7 +293,10 @@ function resetGame() {
 function checkMissileCollisions() {
   // Utiliser la même logique que le client
   const screenWidth = 1920; // Largeur typique d'un écran
-  const segmentWidth = screenWidth / 8;
+  // Adapter la largeur de segment selon le mode de la session
+  // Pour l'instant, on utilise le mode standard (8 segments) car cette fonction est globale
+  const nbSegments = 8; // Mode standard par défaut
+  const segmentWidth = screenWidth / nbSegments;
   
   // Parcourir les missiles dans l'ordre inverse pour éviter les problèmes d'index lors de la suppression
   for (let i = missiles.length - 1; i >= 0; i--) {
@@ -526,7 +534,10 @@ function createDroneFromFactory(factory) {
 function findDroneTarget(ownerSlot, factoryX) {
   // Calculer le point médian du segment pour filtrer les bâtiments
   const screenWidth = 1920;
-  const segmentWidth = screenWidth / 8;
+  // Adapter la largeur de segment selon le mode de la session
+  // Pour l'instant, on utilise le mode standard (8 segments) car cette fonction est globale
+  const nbSegments = 8; // Mode standard par défaut
+  const segmentWidth = screenWidth / nbSegments;
   const segmentStart = ownerSlot * segmentWidth;
   const segmentEnd = segmentStart + segmentWidth;
   const segmentMidpoint = segmentStart + segmentWidth / 2;
@@ -712,24 +723,26 @@ io.on('connection', (socket) => {
   
   // Liste des sessions
   socket.on('list_sessions', () => {
-    // Envoie la liste des sessions (id + nom + nb joueurs)
+    // Envoie la liste des sessions (id + nom + nb joueurs + mode)
     const list = Object.entries(sessions).map(([id, s]) => ({
       id,
       name: s.name,
+      mode: s.mode,
       players: s.players.filter(p => p && !p.isBot).length // Ne compter que les vrais joueurs
     }));
     socket.emit('sessions_list', list);
   });
 
   // Créer une session
-  socket.on('create_session', (sessionName, cb) => {
-    console.log('[SOCKET] create_session reçu pour', sessionName);
-    const sessionId = createSession(sessionName);
+  socket.on('create_session', (sessionName, mode, cb) => {
+    console.log('[SOCKET] create_session reçu pour', sessionName, 'mode:', mode);
+    const sessionId = createSession(sessionName, mode);
     cb && cb(sessionId);
     // Broadcast la nouvelle liste
     io.emit('sessions_list', Object.entries(sessions).map(([id, s]) => ({
       id,
       name: s.name,
+      mode: s.mode,
       players: s.players.filter(p => p && !p.isBot).length
     })));
   });
@@ -1106,21 +1119,20 @@ function startGameForSession(sessionId) {
   console.log(`🎮 [${session.name}] Starting game!`);
   session.gameStarted = true;
 
-  // Créer les bots pour les slots vides AVANT randomisation
-  fillEmptySlotsWithBots(sessionId);
-
   // --- RANDOMISATION DE TOUS LES JOUEURS (HUMAINS + BOTS) ---
   const allPlayers = session.players.filter(p => p !== null);
   for (let i = allPlayers.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [allPlayers[i], allPlayers[j]] = [allPlayers[j], allPlayers[i]];
   }
-  for (let idx = 0; idx < 8; idx++) {
+  // Adapter le nombre de slots selon le mode de la session
+  const maxPlayers = session.mode === '1v1' ? 2 : 8;
+  for (let idx = 0; idx < maxPlayers; idx++) {
     session.players[idx] = allPlayers[idx] || null;
   }
   // Mettre à jour les playerIndex des sockets humains et envoyer le nouvel index
   const ioSockets = Array.from(io.sockets.sockets.values());
-  for (let idx = 0; idx < 8; idx++) {
+  for (let idx = 0; idx < maxPlayers; idx++) {
     const p = session.players[idx];
     if (p && !p.isBot) {
       const sock = ioSockets.find(s => s.id === p.id && s.sessionId === sessionId);
@@ -1137,7 +1149,7 @@ function startGameForSession(sessionId) {
     session.botTimers.forEach(timer => clearInterval(timer));
     session.botTimers.clear();
   }
-  for (let idx = 0; idx < 8; idx++) {
+  for (let idx = 0; idx < maxPlayers; idx++) {
     const p = session.players[idx];
     if (p && p.isBot) {
       startBotTimer(sessionId, idx);
@@ -1157,11 +1169,13 @@ function startGameForSession(sessionId) {
     const nowResource = Date.now();
     if (!session._lastResourceTick) session._lastResourceTick = nowResource;
     if (nowResource - session._lastResourceTick >= 1000) {
-      for (let slot = 0; slot < session.players.length; slot++) {
+      for (let slot = 0; slot < maxPlayers; slot++) {
         const player = session.players[slot];
         if (player && !player.isBot && session.playerHealth[slot] > 0) {
           // Calculer la production
-          const SEGMENT_WIDTH = 1920 / 8;
+          // Adapter la largeur de segment selon le mode de la session
+          const nbSegments = session.mode === '1v1' ? 2 : 8;
+          const SEGMENT_WIDTH = 1920 / nbSegments;
           const myBuildings = session.buildings.filter(b => b.ownerSlot === slot);
           const nbCryptoFarms = myBuildings.filter(b => b.name === 'Crypto Farm').length;
           const nbServeurs = myBuildings.filter(b => b.name === 'Serveur').length;
@@ -1214,7 +1228,7 @@ function startGameForSession(sessionId) {
     const now = Date.now();
     if (now - session._lastRegenTick >= 1000) {
       let healthChanged = false;
-      for (let slot = 0; slot < session.players.length; slot++) {
+      for (let slot = 0; slot < maxPlayers; slot++) {
         if (session.playerHealth[slot] > 0) {
           const hasMedical = session.buildings.some(b => b.ownerSlot === slot && b.name === 'Centre Médical');
           if (hasMedical) {
@@ -1281,7 +1295,9 @@ function stopBarrackTimerForSession(session, barrack) {
 }
 function createMissileFromBarrackForSession(session, barrack) {
   const screenWidth = 1920;
-  const segmentWidth = screenWidth / 8;
+  // Adapter la largeur de segment selon le mode de la session
+  const nbSegments = session.mode === '1v1' ? 2 : 8;
+  const segmentWidth = screenWidth / nbSegments;
   const segmentMidpoint = barrack.ownerSlot * segmentWidth + segmentWidth / 2;
   const direction = barrack.x < segmentMidpoint ? -1 : 1;
   
@@ -1319,7 +1335,9 @@ function createMissileFromBarrackForSession(session, barrack) {
 // --- Collisions par session ---
 function checkMissileCollisionsForSession(session) {
   const screenWidth = 1920;
-  const segmentWidth = screenWidth / 8;
+  // Adapter la largeur de segment selon le mode de la session
+  const nbSegments = session.mode === '1v1' ? 2 : 8;
+  const segmentWidth = screenWidth / nbSegments;
   for (let i = session.missiles.length - 1; i >= 0; i--) {
     const missile = session.missiles[i];
     // Déterminer la direction du missile
@@ -1329,7 +1347,7 @@ function checkMissileCollisionsForSession(session) {
     // On va parcourir les segments dans la direction du missile
     let segmentsToCheck = [];
     if (direction === 1) {
-      for (let s = missileSegment; s < 8; s++) segmentsToCheck.push(s);
+      for (let s = missileSegment; s < nbSegments; s++) segmentsToCheck.push(s);
     } else {
       for (let s = missileSegment; s >= 0; s--) segmentsToCheck.push(s);
     }
@@ -1394,7 +1412,9 @@ function stopDroneFactoryTimerForSession(session, factory) {
 function createDroneFromFactoryForSession(session, factory) {
   // Trouver une cible ennemie (Antimissile uniquement)
   const screenWidth = 1920;
-  const segmentWidth = screenWidth / 8;
+  // Adapter la largeur de segment selon le mode de la session
+  const nbSegments = session.mode === '1v1' ? 2 : 8;
+  const segmentWidth = screenWidth / nbSegments;
   const segmentStart = factory.ownerSlot * segmentWidth;
   const segmentEnd = segmentStart + segmentWidth;
   const segmentMidpoint = segmentStart + segmentWidth / 2;
@@ -1621,7 +1641,9 @@ function annexSegmentOnElimination(session, eliminatedSlot, killerSlot) {
   }
   // Transférer tous les bâtiments des segments annexés
   const screenWidth = 1920;
-  const segmentWidth = screenWidth / 8;
+  // Adapter la largeur de segment selon le mode de la session
+  const nbSegments = session.mode === '1v1' ? 2 : 8;
+  const segmentWidth = screenWidth / nbSegments;
   for (const seg of allSegments) {
     const segStart = seg * segmentWidth;
     const segEnd = segStart + segmentWidth;
@@ -1743,7 +1765,9 @@ function updateBotResources(sessionId, slot) {
   }
   
   // Calculer la production du bot
-  const SEGMENT_WIDTH = 1920 / 8;
+  // Adapter la largeur de segment selon le mode de la session
+  const nbSegments = session.mode === '1v1' ? 2 : 8;
+  const SEGMENT_WIDTH = 1920 / nbSegments;
   const botBuildings = session.buildings.filter(b => b.ownerSlot === slot);
   const nbCryptoFarms = botBuildings.filter(b => b.name === 'Crypto Farm').length;
   const nbServeurs = botBuildings.filter(b => b.name === 'Serveur').length;
@@ -1764,7 +1788,9 @@ function decideBotBuilding(sessionId, slot) {
   if (!session) return null;
   const bot = session.players[slot];
   if (!bot || !bot.isBot) return null;
-  const SEGMENT_WIDTH = 1920 / 8;
+  // Adapter la largeur de segment selon le mode de la session
+  const nbSegments = session.mode === '1v1' ? 2 : 8;
+  const SEGMENT_WIDTH = 1920 / nbSegments;
   const segmentStart = slot * SEGMENT_WIDTH;
   const segmentEnd = segmentStart + SEGMENT_WIDTH;
   const botBuildings = session.buildings.filter(b => b.ownerSlot === slot);
@@ -1919,7 +1945,9 @@ function placeBotBuilding(sessionId, slot, building) {
   if (!session) return;
   const bot = session.players[slot];
   if (!bot || !bot.isBot) return;
-  const SEGMENT_WIDTH = 1920 / 8;
+  // Adapter la largeur de segment selon le mode de la session
+  const nbSegments = session.mode === '1v1' ? 2 : 8;
+  const SEGMENT_WIDTH = 1920 / nbSegments;
   const segmentStart = slot * SEGMENT_WIDTH;
   const segmentEnd = segmentStart + SEGMENT_WIDTH;
   const segmentCenter = segmentStart + SEGMENT_WIDTH / 2;
@@ -1989,7 +2017,10 @@ function fillEmptySlotsWithBots(sessionId) {
   const session = sessions[sessionId];
   if (!session) return;
   
-  for (let slot = 0; slot < 8; slot++) {
+  // Adapter le nombre de slots selon le mode de la session
+  const maxPlayers = session.mode === '1v1' ? 2 : 8;
+  
+  for (let slot = 0; slot < maxPlayers; slot++) {
     if (!session.players[slot]) {
       createBotPlayer(sessionId, slot);
     }
@@ -2034,7 +2065,10 @@ io.on('disconnect', (socket) => {
 
 // --- UTILITAIRE : Vérifie si une position est sur la barre de vie du joueur (bande verticale centrale du segment) ---
 function isOnHealthBar(x, y, slot) {
-  const SEGMENT_WIDTH = 1920 / 8;
+  // Adapter la largeur de segment selon le mode de la session
+  // Pour l'instant, on utilise le mode standard (8 segments) car cette fonction est globale
+  const nbSegments = 8; // Mode standard par défaut
+  const SEGMENT_WIDTH = 1920 / nbSegments;
   const segmentStart = slot * SEGMENT_WIDTH;
   const segmentCenter = segmentStart + SEGMENT_WIDTH / 2;
   // Coordonnées de la barre de vie côté client :

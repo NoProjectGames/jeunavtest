@@ -1,10 +1,9 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { io } from 'socket.io-client';
 
-const socket = io('https://jeunavtest.onrender.com'); //https://jeunavtest.onrender.com //http://localhost:3001
+const socket = io('http://localhost:3001'); //https://jeunavtest.onrender.com //http://localhost:3001
 
 const NB_PLAYERS = 8;
-const BASE_VIEW_RATIO = 0.7;
 const BUILDINGS = [
   { name: 'Lance Missile', icon: '🚀', cost: 50000 },
   { name: 'Crypto Farm', icon: '💻', cost: 25000 },
@@ -17,13 +16,6 @@ const BUILDINGS = [
 const INITIAL_RESOURCES = { gold: 30000, datas: 100000, cryptoPerSec: 1000, datasPerSec: 20000 };
 const BASE_GOLD_PER_SEC = 1000;
 const CRYPTO_FARM_BONUS = 5000;
-const SOLDIER_SPEED = 5;
-const SOLDIER_PROD_TIME = 3000;
-const SOLDIER_SIZE = 22;
-const SOLDIER_RANGE = 60;
-const SOLDIER_FIRE_RATE = 1000;
-const EDGE_ZONE = 60;
-const CAMERA_SPEED = 20;
 
 // Palette de couleurs pales pour chaque joueur
 const PLAYER_COLORS = [
@@ -108,10 +100,7 @@ function App() {
   const [blackMarketItems, setBlackMarketItems] = useState([]);
 
   const svgHeight = 700;
-  const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
   const totalWidth = MAP_WIDTH;
-
-  const baseX = mySlot * SEGMENT_WIDTH;
 
   // Correction : initialisation locale de segmentsByPlayer si vide
   const effectiveSegmentsByPlayer = Object.keys(segmentsByPlayer).length > 0
@@ -120,6 +109,16 @@ function App() {
 
   // Calcul de effectiveMySlot en dehors du useEffect
   const effectiveMySlot = mySlot;
+
+  // Déterminer le nombre de segments selon le mode de la partie
+  const currentSession = sessionList.find(s => s.id === sessionId);
+  const NB_SEGMENTS = currentSession && currentSession.mode === '1v1' ? 2 : 8;
+  const SEGMENT_WIDTH = MAP_WIDTH / NB_SEGMENTS;
+  
+  // Debug logs
+  console.log('[DEBUG] Session mode:', currentSession?.mode);
+  console.log('[DEBUG] NB_SEGMENTS:', NB_SEGMENTS);
+  console.log('[DEBUG] SEGMENT_WIDTH:', SEGMENT_WIDTH);
 
   useEffect(() => {
     console.log('Connecting to server...');
@@ -302,17 +301,22 @@ function App() {
     const interval = setInterval(() => {
       console.log('[PROD] setResources called');
       // Utilise directement les states
-      const SEGMENT_WIDTH_LOCAL = MAP_WIDTH / NB_PLAYERS;
-      let mySegments = Object.entries(effectiveSegmentsByPlayer)
-        .filter(([segIdx, owner]) => owner === effectiveMySlot)
-        .map(([segIdx]) => parseInt(segIdx));
-      // Correction : si aucun segment trouvé, prendre le segment d'origine
-      if (mySegments.length === 0 && effectiveMySlot !== null) {
+      let mySegments = [];
+      if (currentSession && currentSession.mode === '1v1') {
+        // En mode 1v1, le joueur possède son segment (0 ou 1)
         mySegments = [effectiveMySlot];
+      } else {
+        // En mode standard, utiliser la logique des segments annexés
+        mySegments = Object.entries(effectiveSegmentsByPlayer)
+          .filter(([segIdx, owner]) => owner === effectiveMySlot)
+          .map(([segIdx]) => parseInt(segIdx));
+        // Correction : si aucun segment trouvé, prendre le segment d'origine
+        if (mySegments.length === 0 && effectiveMySlot !== null) {
+          mySegments = [effectiveMySlot];
+        }
       }
       const myBuildings = buildings.filter(b => {
-        const segIdx = Math.floor(b.x / SEGMENT_WIDTH_LOCAL);
-        return mySegments.includes(segIdx);
+        return mySegments.includes(Math.floor(b.x / SEGMENT_WIDTH));
       });
       const nbCryptoFarms = myBuildings.filter(b => b.name === 'Crypto Farm').length;
       const nbServeurs = myBuildings.filter(b => b.name === 'Serveur').length;
@@ -389,8 +393,6 @@ function App() {
   }
 
   function handleMapClickForBuild(e) {
-    // S'assurer que SEGMENT_WIDTH est bien défini
-    const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
     console.log('[CLICK] handleMapClickForBuild called, missileMenu:', missileMenu, 'buildMenu:', buildMenu);
     
     // Fermer le menu des missiles si ouvert
@@ -447,7 +449,8 @@ function App() {
       }));
       
       // Démarrer l'animation du bombardement
-      const startX = (mySlot * SEGMENT_WIDTH) + (SEGMENT_WIDTH / 2); // Centre du segment du joueur
+      const SEGMENT_WIDTH_AIR = MAP_WIDTH / NB_SEGMENTS;
+      const startX = (mySlot * SEGMENT_WIDTH_AIR) + (SEGMENT_WIDTH_AIR / 2); // Centre du segment du joueur
       const startY = svgHeight * 0.5; // Milieu de la hauteur
       
       setAirStrikeData({
@@ -525,8 +528,9 @@ function App() {
       y = ((e.clientY - rect.top) / rect.height) * svgHeight;
     }
     // Vérifier si le clic est sur la barre de vie
-    const segmentStart = mySlot * SEGMENT_WIDTH;
-    const segmentCenter = segmentStart + SEGMENT_WIDTH / 2;
+    const SEGMENT_WIDTH_BUILD = MAP_WIDTH / NB_SEGMENTS;
+    const segmentStart = mySlot * SEGMENT_WIDTH_BUILD;
+    const segmentCenter = segmentStart + SEGMENT_WIDTH_BUILD / 2;
     if (x >= segmentCenter - 8 && x <= segmentCenter + 8 && y >= 140 && y <= 560) {
       setErrorMsg("Impossible de construire sur la barre de vie !");
       setTimeout(() => setErrorMsg(""), 2000);
@@ -541,8 +545,16 @@ function App() {
     const mapTop = svgHeight * 0.2;
     const mapBottom = svgHeight * 0.8;
     // Trouver le segment cliqué
-    const segIdx = Math.floor(x / SEGMENT_WIDTH);
-    const ownerSlot = effectiveSegmentsByPlayer[segIdx] !== undefined ? effectiveSegmentsByPlayer[segIdx] : segIdx;
+    const segIdx = Math.floor(x / SEGMENT_WIDTH_BUILD);
+    // Déterminer le propriétaire du segment selon le mode
+    let ownerSlot;
+    if (currentSession && currentSession.mode === '1v1') {
+      // En mode 1v1, les segments 0 et 1 correspondent directement aux joueurs 0 et 1
+      ownerSlot = segIdx;
+    } else {
+      // En mode standard, utiliser la logique des segments annexés
+      ownerSlot = effectiveSegmentsByPlayer[segIdx] !== undefined ? effectiveSegmentsByPlayer[segIdx] : segIdx;
+    }
     
     if (mySlot < 0 || ownerSlot !== mySlot || y < mapTop || y > mapBottom) {
       setLastClick({ x: Math.round(x), y: Math.round(y), error: true });
@@ -677,11 +689,20 @@ function App() {
     }
   }, [inLobby]);
 
-  // Fonction pour créer une session
+  // Fonction pour créer une session standard
   function handleCreateSession() {
     if (!sessionName.trim()) return;
     setJoining(true);
-    socket.emit('create_session', sessionName, (newSessionId) => {
+    socket.emit('create_session', sessionName, 'standard', (newSessionId) => {
+      setSessionId(newSessionId);
+      handleJoinSession(newSessionId);
+    });
+  }
+  // Fonction pour créer une session 1v1
+  function handleCreateSession1v1() {
+    if (!sessionName.trim()) return;
+    setJoining(true);
+    socket.emit('create_session', sessionName, '1v1', (newSessionId) => {
       setSessionId(newSessionId);
       handleJoinSession(newSessionId);
     });
@@ -794,26 +815,9 @@ function App() {
   // Handler de clic sur la map pour la nuke
   function handleMapClickForNuke(e) {
     if (!pendingNukeTarget) return false;
-    // Calculer le segment cliqué
-    const svg = svgRef.current;
-    let x;
-    if (svg && typeof svg.createSVGPoint === 'function') {
-      const pt = svg.createSVGPoint();
-      pt.x = e.clientX;
-      pt.y = e.clientY;
-      const ctm = svg.getScreenCTM();
-      if (ctm) {
-        const svgP = pt.matrixTransform(ctm.inverse());
-        x = svgP.x;
-      } else {
-        const rect = svg.getBoundingClientRect();
-        x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
-      }
-    } else {
-      const rect = svg.getBoundingClientRect();
-      x = ((e.clientX - rect.left) / rect.width) * MAP_WIDTH;
-    }
-    const SEGMENT_WIDTH = MAP_WIDTH / NB_PLAYERS;
+    const rect = svgRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / zoom - mapOffset.x / zoom;
+    const SEGMENT_WIDTH = MAP_WIDTH / NB_SEGMENTS;
     const segIdx = Math.floor(x / SEGMENT_WIDTH);
     // On ne peut pas nuker son propre segment
     if (segIdx === mySlot) {
@@ -866,8 +870,8 @@ function App() {
               <ul style={{listStyle:'none',padding:0}}>
                 {sessionList.map(s => (
                   <li key={s.id} style={{marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                    <span><b>{s.name}</b> ({s.players}/8)</span>
-                    <button onClick={() => handleJoinSession(s.id)} disabled={joining || !pseudo.trim() || s.players >= 8} style={{marginLeft:10}}>Rejoindre</button>
+                    <span><b>{s.name}</b> ({s.players}/{s.mode === '1v1' ? 2 : 8}) <span style={{fontSize:13,color:'#aaa',marginLeft:6}}>{s.mode === '1v1' ? '1v1' : 'Standard'}</span></span>
+                    <button onClick={() => handleJoinSession(s.id)} disabled={joining || !pseudo.trim() || (s.mode === '1v1' ? s.players >= 2 : s.players >= 8)} style={{marginLeft:10}}>Rejoindre</button>
                   </li>
                 ))}
               </ul>
@@ -884,6 +888,9 @@ function App() {
             />
             <button onClick={handleCreateSession} disabled={joining || !pseudo.trim() || !sessionName.trim()}>
               Créer une partie
+            </button>
+            <button onClick={handleCreateSession1v1} disabled={joining || !pseudo.trim() || !sessionName.trim()} style={{marginLeft:8}}>
+              Créer une partie 1v1
             </button>
           </div>
           {sessionError && <div style={{color:'red',marginTop:10}}>{sessionError}</div>}
@@ -982,13 +989,22 @@ function App() {
                 {/* Route principale */}
                 <rect x={0} y={svgHeight * 0.2} width={MAP_WIDTH} height={svgHeight * 0.6} fill="#e0e0e0" rx={30} />
                 {/* Segments et bases */}
-                {Array.from({ length: NB_PLAYERS }).map((_, segIdx) => {
+                {Array.from({ length: NB_SEGMENTS }).map((_, segIdx) => {
                   const x = segIdx * SEGMENT_WIDTH;
-                  // Déterminer le propriétaire du segment (ownerSlot)
-                  const ownerSlot = effectiveSegmentsByPlayer[segIdx] !== undefined ? effectiveSegmentsByPlayer[segIdx] : segIdx;
+                  // Déterminer le propriétaire du segment selon le mode
+                  let ownerSlot;
+                  if (currentSession && currentSession.mode === '1v1') {
+                    // En mode 1v1, les segments 0 et 1 correspondent directement aux joueurs 0 et 1
+                    ownerSlot = segIdx;
+                  } else {
+                    // En mode standard, utiliser la logique des segments annexés
+                    ownerSlot = effectiveSegmentsByPlayer[segIdx] !== undefined ? effectiveSegmentsByPlayer[segIdx] : segIdx;
+                  }
                   const player = players[ownerSlot];
                   const pseudo = player && typeof player.pseudo === 'string' ? player.pseudo : '';
                   const isMe = ownerSlot === mySlot;
+                  // Calcul de la position centrale de la barre de vie pour chaque segment
+                  const segmentCenter = x + SEGMENT_WIDTH / 2;
                   return (
                     <g key={segIdx}>
                       {/* Séparateur */}
@@ -999,7 +1015,7 @@ function App() {
                       <g>
                         {/* Barre de fond (vie perdue) */}
                         <rect
-                          x={x + SEGMENT_WIDTH / 2 - 8}
+                          x={segmentCenter - 8}
                           y={svgHeight * 0.2}
                           width={16}
                           height={svgHeight * 0.6}
@@ -1009,7 +1025,7 @@ function App() {
                         />
                         {/* Barre de vie (vie restante) */}
                         <rect
-                          x={x + SEGMENT_WIDTH / 2 - 8}
+                          x={segmentCenter - 8}
                           y={svgHeight * 0.2 + (svgHeight * 0.6) * (1 - playerHealth[ownerSlot] / 100)}
                           width={16}
                           height={(svgHeight * 0.6) * (playerHealth[ownerSlot] / 100)}
@@ -1018,7 +1034,7 @@ function App() {
                           rx={4}
                         />
                         <text
-                          x={x + SEGMENT_WIDTH / 2}
+                          x={segmentCenter}
                           y={svgHeight * 0.52}
                           textAnchor="middle"
                           fontSize={20}
@@ -1029,7 +1045,7 @@ function App() {
                         </text>
                         {/* Affichage de la vie en pourcentage */}
                         <text
-                          x={x + SEGMENT_WIDTH / 2}
+                          x={segmentCenter}
                           y={svgHeight * 0.85}
                           textAnchor="middle"
                           fontSize={14}
@@ -1038,32 +1054,6 @@ function App() {
                         >
                           {`${playerHealth[ownerSlot]}%`}
                         </text>
-                        {/* Affichage du pseudo sous la vie pour chaque joueur (robuste) */}
-                        {pseudo && (
-                          <text
-                            x={x + SEGMENT_WIDTH / 2}
-                            y={pseudo.includes('Bot') ? svgHeight * 0.93 : svgHeight * 0.89}
-                            textAnchor="middle"
-                            fontSize={14}
-                            fontWeight="bold"
-                            fill={PLAYER_COLORS[ownerSlot]}
-                          >
-                            {pseudo}
-                          </text>
-                        )}
-                        {/* Indicateur de bot */}
-                        {pseudo && pseudo.includes('Bot') && (
-                          <text
-                            x={x + SEGMENT_WIDTH / 2}
-                            y={svgHeight * 0.89}
-                            textAnchor="middle"
-                            fontSize={12}
-                            fontWeight="bold"
-                            fill="#ff6b6b"
-                          >
-                            🤖 AI
-                          </text>
-                        )}
                       </g>
                     </g>
                   );
@@ -1419,7 +1409,7 @@ function App() {
       )}
       {/* Debug info */}
       <div style={{ marginTop: 10, color: '#fff', fontSize: 12 }}>
-        Debug: mySlot={mySlot}, baseX={baseX}, SEGMENT_WIDTH={SEGMENT_WIDTH}, totalWidth={totalWidth}
+        Debug: mySlot={mySlot}, totalWidth={totalWidth}
       </div>
       <div style={{ marginTop: 5, color: '#fff', fontSize: 12 }}>
         Connection: socket.id={socket.id}, myId={myId}, myIndex={myIndex}, connected={socket.connected}
