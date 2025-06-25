@@ -815,10 +815,10 @@ io.on('connection', (socket) => {
       socket.emit('resources_update', { gold: session.players[slot].gold });
     }
     if (buildingToAdd.name === 'Lance Missile') {
-      startBarrackTimerForSession(session, buildingToPlace);
+      startBarrackTimerForSession(session, buildingToAdd);
     }
     if (buildingToAdd.name === 'Usine de Drones') {
-      startDroneFactoryTimerForSession(session, buildingToPlace);
+      startDroneFactoryTimerForSession(session, buildingToAdd);
     }
   });
 
